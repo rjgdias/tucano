@@ -250,6 +250,13 @@ const MIGRATIONS = [
   `
   ALTER TABLE messages ADD COLUMN thread_id TEXT;
   CREATE INDEX messages_by_thread ON messages (conversation_id, thread_id, at);
+  `,
+  `
+  ALTER TABLE agents ADD COLUMN team TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE conversations ADD COLUMN pair INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  ALTER TABLE conversations ADD COLUMN request TEXT;
   `
 ]
 
@@ -353,6 +360,7 @@ export class Db {
       ...(r['wiki'] === 'none' || r['wiki'] === 'read' ? { wiki: r['wiki'] } : {}),
       autoApprove: JSON.parse(str(r['auto_approve']) || '[]') as string[],
       folders: JSON.parse(str(r['folders']) || '[]') as LentFolder[],
+      team: JSON.parse(str(r['team']) || '[]') as string[],
       archived: r['archived'] === 1,
       ...(str(r['kind']) === 'tuca' ? { kind: 'tuca' as const } : {})
     }
@@ -370,19 +378,28 @@ export class Db {
   saveAgent(a: Agent): void {
     this.db
       .prepare(
-        `INSERT INTO agents (id, name, handle, role, color, instructions, model, fallback_model, fallback_account, account, effort, limit_tokens, max_routines, grants, memory_mode, computer, computer_kind, web, browser, apps, auto_approve, archived, kind, custom_color, picture, avatar, wiki, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO agents (id, name, handle, role, color, instructions, model, fallback_model, fallback_account, account, effort, limit_tokens, max_routines, grants, memory_mode, computer, computer_kind, web, browser, apps, auto_approve, archived, kind, custom_color, picture, avatar, wiki, team, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET name = excluded.name, handle = excluded.handle, role = excluded.role,
            color = excluded.color, instructions = excluded.instructions, model = excluded.model, fallback_model = excluded.fallback_model, fallback_account = excluded.fallback_account, account = excluded.account, effort = excluded.effort,
            limit_tokens = excluded.limit_tokens, max_routines = excluded.max_routines, grants = excluded.grants, memory_mode = excluded.memory_mode,
-           computer = excluded.computer, computer_kind = excluded.computer_kind, web = excluded.web, browser = excluded.browser, apps = excluded.apps, auto_approve = excluded.auto_approve, archived = excluded.archived, kind = COALESCE(excluded.kind, agents.kind), custom_color = excluded.custom_color, picture = excluded.picture, avatar = excluded.avatar, wiki = excluded.wiki`
+           computer = excluded.computer, computer_kind = excluded.computer_kind, web = excluded.web, browser = excluded.browser, apps = excluded.apps, auto_approve = excluded.auto_approve, archived = excluded.archived, kind = COALESCE(excluded.kind, agents.kind), custom_color = excluded.custom_color, picture = excluded.picture, avatar = excluded.avatar, wiki = excluded.wiki, team = excluded.team`
       )
-      .run(a.id, a.name, a.handle, a.role, a.color, a.instructions, a.modelId, a.fallbackModelId || null, a.fallbackAccountId || null, a.accountId || null, a.effort, a.limit, routineCap(a.maxRoutines), JSON.stringify(a.grants), a.memory ?? 'auto', a.computer ? 1 : 0, a.computerKind === 'mac' ? 'mac' : 'linux', a.web === false ? 0 : 1, a.browser ? 1 : 0, JSON.stringify(a.apps ?? []), JSON.stringify(a.autoApprove ?? []), a.archived ? 1 : 0, a.kind ?? null, a.customColor ?? null, a.picture ?? null, a.avatar ? JSON.stringify(a.avatar) : null, a.wiki ?? null, Date.now())
+      .run(a.id, a.name, a.handle, a.role, a.color, a.instructions, a.modelId, a.fallbackModelId || null, a.fallbackAccountId || null, a.accountId || null, a.effort, a.limit, routineCap(a.maxRoutines), JSON.stringify(a.grants), a.memory ?? 'auto', a.computer ? 1 : 0, a.computerKind === 'mac' ? 'mac' : 'linux', a.web === false ? 0 : 1, a.browser ? 1 : 0, JSON.stringify(a.apps ?? []), JSON.stringify(a.autoApprove ?? []), a.archived ? 1 : 0, a.kind ?? null, a.customColor ?? null, a.picture ?? null, a.avatar ? JSON.stringify(a.avatar) : null, a.wiki ?? null, JSON.stringify((a.team ?? []).filter((id) => id !== a.id)), Date.now())
   }
 
   // Kept apart from saveAgent: folders change only after the core checks them.
   setFolders(agentId: string, folders: LentFolder[]): void {
     this.db.prepare('UPDATE agents SET folders = ? WHERE id = ?').run(JSON.stringify(folders), agentId)
+  }
+
+  // What one request has spent so far, in counted tokens: the message that started it and every reply that
+  // belongs to it (delegated work, follow-ups, reports), whoever wrote them.
+  requestSpent(root: string): number {
+    const r = this.db
+      .prepare(`SELECT COALESCE(ROUND(SUM(${COUNTED})), 0) AS used FROM receipts WHERE message_id = ? OR message_id IN (SELECT id FROM messages WHERE json_extract(run, '$.root') = ?)`)
+      .get(root, root) as { used: number }
+    return r.used
   }
 
   usedThisMonth(agentId: string): number {
@@ -399,14 +416,16 @@ export class Db {
     const members = this.db.prepare('SELECT conversation_id, agent_id FROM members').all() as { conversation_id: string; agent_id: string }[]
     return rows.map((r) => ({
       id: str(r['id']),
-      kind: str(r['kind']) as Conversation['kind'],
+      // A DM between two agents is kept as a channel row (the kind's CHECK predates it), marked as a pair.
+      kind: r['pair'] === 1 ? 'agents' : (str(r['kind']) as Conversation['kind']),
       name: str(r['name']),
       topic: r['topic'] ? str(r['topic']) : undefined,
       members: members.filter((m) => m.conversation_id === r['id']).map((m) => m.agent_id),
       summary: r['summary'] ? str(r['summary']) : undefined,
       summaryUntil: r['summary_until'] ? Number(r['summary_until']) : undefined,
       summaryAt: r['summary_at'] ? Number(r['summary_at']) : undefined,
-      ...(r['wiki_capture'] === 0 ? { wikiCapture: false } : {})
+      ...(r['wiki_capture'] === 0 ? { wikiCapture: false } : {}),
+      ...(r['request'] ? { request: str(r['request']) } : {})
     }))
   }
 
@@ -422,7 +441,7 @@ export class Db {
 
   createConversation(c: Omit<Conversation, 'unread'>): void {
     this.tx(() => {
-      this.db.prepare('INSERT INTO conversations (id, kind, name, topic, created_at) VALUES (?, ?, ?, ?, ?)').run(c.id, c.kind, c.name, c.topic ?? null, Date.now())
+      this.db.prepare('INSERT INTO conversations (id, kind, name, topic, pair, request, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(c.id, c.kind === 'agents' ? 'channel' : c.kind, c.name, c.topic ?? null, c.kind === 'agents' ? 1 : 0, c.request ?? null, Date.now())
       for (const m of c.members) this.db.prepare('INSERT INTO members (conversation_id, agent_id) VALUES (?, ?)').run(c.id, m)
     })
   }

@@ -110,7 +110,7 @@ export function ConversationView({ id }: { id: string }): ReactNode {
   const members = useStore((s) => {
     if (!conv) return []
     const all = conv.members.map((m) => agentById(s, m)).filter((a): a is Agent => !!a)
-    return conv.kind === 'dm' ? all : all.filter(isTeam)
+    return conv.kind === 'channel' ? all.filter(isTeam) : all
   })
   const messages = useStore((s) => s.messages.filter((m) => m.conversationId === id))
   const focus = useStore((s) => (s.view?.kind === 'conversation' && s.view.id === id ? s.view.message : undefined))
@@ -134,15 +134,27 @@ export function ConversationView({ id }: { id: string }): ReactNode {
       </div>
     )
   const dmAgent = conv.kind === 'dm' ? members[0] : undefined
+  const pair = conv.kind === 'agents' ? members : undefined
 
   return (
     <div className="split">
       <section className="conversation">
         <header className="topbar">
           <div className="topbar__title">
-            {dmAgent ? <AgentAvatar agent={dmAgent} size={22} /> : <Icon name="hash" />}
+            {dmAgent ? (
+              <AgentAvatar agent={dmAgent} size={22} />
+            ) : pair ? (
+              <span className="pair-avatars">
+                {pair.map((a) => (
+                  <AgentAvatar key={a.id} agent={a} size={20} />
+                ))}
+              </span>
+            ) : (
+              <Icon name="hash" />
+            )}
             <h1>{title}</h1>
             {dmAgent && <span className="tag">{dmAgent.role}</span>}
+            {pair && !conv.topic && <span className="topbar__topic">{L('DM entre agentes: você lê e pode responder aqui', 'DM between agents: you can read and answer here')}</span>}
             {conv.topic && <span className="topbar__topic">{conv.topic}</span>}
           </div>
           <div className="topbar__actions">
@@ -173,7 +185,7 @@ export function ConversationView({ id }: { id: string }): ReactNode {
         {showSummary && <SummaryPanel conv={conv} messages={messages.filter((m) => !m.threadId)} onClose={() => setShowSummary(false)} />}
 
         <MessageList messages={messages} conversationId={id} empty={conv.kind === 'channel' && members.length === 0} focus={focus} threads />
-        <Composer conversationId={id} members={members} placeholder={dmAgent ? L(`Mensagem pra ${dmAgent.name}`, `Message ${dmAgent.name}`) : L(`Mensagem em #${title}`, `Message #${title}`)} />
+        <Composer conversationId={id} members={members} placeholder={dmAgent ? L(`Mensagem pra ${dmAgent.name}`, `Message ${dmAgent.name}`) : pair ? L(`Mensagem pra ${title}`, `Message ${title}`) : L(`Mensagem em #${title}`, `Message #${title}`)} />
       </section>
       {thread ? <ThreadPanel rootId={thread} conv={conv} title={conv.kind === 'channel' ? `#${title}` : title} members={members} /> : <SidePanel />}
     </div>
@@ -291,6 +303,75 @@ export function MessageList({ messages: all, conversationId, empty, focus, threa
 const AGENT_PLUGINS = [remarkGfm, remarkLocalPaths]
 const keepLocalLinks = (url: string): string => (url.startsWith(LOCAL_LINK) ? url : defaultUrlTransform(url))
 
+// What an agent handed out from this message, each with how it's going and a way to where it happens
+// (the DM between the two agents). Your DM only shows this line; the work itself stays there.
+function Handoffs({ message }: { message: Message }): ReactNode {
+  const items = message.run!.delegated!
+  const latest = useStore((s) => items.map((t) => s.messages.findLast((m) => m.run?.delegation?.id === t.id && m.run.delegation.from === message.id)))
+  const agents = useStore((s) => items.map((t) => agentById(s, t.agentId)))
+  // The person deleted the DM it ran in, once the request was over: what it said is gone with it.
+  const deleted = useStore((s) => items.map((t) => !!t.conversationId && !s.conversations.some((c) => c.id === t.conversationId)))
+  // A question asked in a channel: where, for its label and its link.
+  const channels = useStore((s) => items.map((t) => (t.askedIn ? s.conversations.find((c) => c.id === t.askedIn)?.name : undefined)))
+  const stateOf = (m: Message | undefined, gone: boolean, t: (typeof items)[number]): { label: string; tone: string } => {
+    if (!m && gone) return { label: L('conversa apagada', 'conversation deleted'), tone: '' }
+    if (t.nobody) return { label: L('ninguém pôde ajudar', 'no one could help'), tone: '' }
+    if (t.askedIn && !t.agentId) return { label: L('procurando quem ajuda', 'looking for help'), tone: 'tag--warn' }
+    const st = m?.run?.status
+    if (!m || st === 'working') return { label: L('trabalhando', 'working'), tone: 'tag--warn' }
+    if (st === 'waiting_input') return { label: L('te perguntou algo', 'asked you something'), tone: 'tag--warn' }
+    if (st === 'waiting_approval') return { label: L('pede aprovação', 'asks for approval'), tone: 'tag--warn' }
+    if (m.run?.delegated?.length) return { label: L('esperando a equipe dele', 'waiting on its team'), tone: 'tag--warn' }
+    if (st === 'done') return { label: L('respondeu', 'answered'), tone: 'tag--ok' }
+    if (st === 'paused') return { label: L('pausou', 'paused'), tone: 'tag--warn' }
+    return { label: L('parou', 'stopped'), tone: 'tag--danger' }
+  }
+  return (
+    <div className="handoffs">
+      {items.map((t, i) => {
+        const agent = agents[i]
+        const state = stateOf(latest[i], deleted[i]!, t)
+        const elsewhere = t.conversationId && t.conversationId !== message.conversationId && !deleted[i]
+        return (
+          <div key={t.id} className="handoff" title={t.task}>
+            <Icon name="send" size={12} />
+            {agent && <AgentAvatar agent={agent} size={16} />}
+            <span className="handoff__who">
+              {agent?.name ?? (t.askedIn ? '' : L('agente removido', 'removed agent'))}
+              {t.askedIn && `${agent ? L(' em ', ' in ') : ''}#${channels[i] ?? '?'}`}
+            </span>
+            <span className="handoff__task">{t.task}</span>
+            <span className={`tag ${state.tone}`}>{state.label}</span>
+            {elsewhere && (
+              <button
+                className="link handoff__open"
+                onClick={() => {
+                  navigate({ kind: 'conversation', id: t.conversationId! })
+                  if (t.threadId) openThread(t.threadId)
+                }}
+              >
+                {L('abrir conversa', 'open conversation')}
+              </button>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// Under a lead's report: the tasks it reports on, with how each one ended and a way to its conversation.
+function ReportBasis({ id }: { id: string }): ReactNode {
+  const head = useStore((s) => s.messages.find((m) => m.id === id))
+  if (!head?.run?.delegated?.length) return null
+  return (
+    <div className="report-basis">
+      <span className="report-basis__label">{L('Com base em', 'Based on')}</span>
+      <Handoffs message={head} />
+    </div>
+  )
+}
+
 // `replies`: in a timeline with threads, the replies to this message (none yet: empty).
 function MessageRow({ message, grouped, replies }: { message: Message; grouped: boolean; replies?: Message[] }): ReactNode {
   const me = useStore((s) => s.me)
@@ -298,6 +379,7 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
   const threadOpen = useStore((s) => !!replies && s.panel?.kind === 'thread' && s.panel.id === message.id)
   const agent = useStore((s) => (message.author.kind === 'agent' ? agentById(s, message.author.id) : undefined))
   const approval = useStore((s) => (message.run?.approvalId ? s.approvals.find((a) => a.id === message.run!.approvalId) : undefined))
+  const manager = useStore((s) => (message.run?.delegation ? agentById(s, message.run.delegation.by) : undefined))
   const attached = useStore((s) => (message.author.kind === 'me' ? s.artifacts.filter((a) => a.messageId === message.id && a.agentId === '') : []))
   // The browser shows live on the agent's latest message that used it, unless it's open on the side.
   const liveBrowser = useStore(
@@ -338,6 +420,12 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
             ) : (
               <span className="msg__author">{name}</span>
             )}
+            {message.run?.reportOf && <span className="tag tag--ok">{L('Retorno da equipe', 'Team report')}</span>}
+            {manager && (
+              <span className="tag" title={`${L('Tarefa', 'Task')}: ${message.run!.delegation!.task}`}>
+                {L(`a pedido de ${manager.name}`, `for ${manager.name}`)}
+              </span>
+            )}
             {agent?.computer && agent.computerKind === 'mac' && (
               <span className="tag tag--warn" title={L('Os comandos deste agente rodam direto no seu computador', 'This agent’s commands run right on your computer')}>
                 {L('no seu computador', 'on your computer')}
@@ -363,6 +451,8 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
             ))}
           </div>
         )}
+        {message.run?.delegated && <Handoffs message={message} />}
+        {message.run?.reportOf && <ReportBasis id={message.run.reportOf} />}
         {message.run?.question && <QuestionCard question={message.run.question} answered={message.run.status !== 'waiting_input'} />}
         {approval && <ApprovalCard approval={approval} />}
         {message.run?.agentDraft && <AgentProposal message={message} />}

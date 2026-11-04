@@ -265,11 +265,14 @@ describe('what a thread message sets off stays in the thread', () => {
 describe('the database', () => {
   it('an existing database gains thread_id, and messages round-trip it', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'ad-db-')), 'old.db')
-    // A database from before threads: the schema one migration back, with a message in it.
+    // A database from before threads, with a message in it: the schema back to before the threads'
+    // migration, undoing the two that came after it (the team and the DMs between agents).
     new Db(file).close()
     const raw = new DatabaseSync(file)
     const { user_version } = raw.prepare('PRAGMA user_version').get() as { user_version: number }
-    raw.exec(`DROP INDEX messages_by_thread; ALTER TABLE messages DROP COLUMN thread_id; PRAGMA user_version = ${user_version - 1};`)
+    raw.exec(
+      `ALTER TABLE conversations DROP COLUMN request; ALTER TABLE conversations DROP COLUMN pair; ALTER TABLE agents DROP COLUMN team; DROP INDEX messages_by_thread; ALTER TABLE messages DROP COLUMN thread_id; PRAGMA user_version = ${user_version - 3};`
+    )
     raw.exec("INSERT INTO conversations (id, kind, name, created_at) VALUES ('c1', 'channel', 'geral', 1)")
     raw.exec("INSERT INTO messages (id, conversation_id, author_kind, text, at) VALUES ('old', 'c1', 'me', 'antes das threads', 1)")
     raw.close()
