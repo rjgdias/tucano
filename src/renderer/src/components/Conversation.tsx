@@ -281,6 +281,8 @@ function Handoffs({ message }: { message: Message }): ReactNode {
   const items = message.run!.delegated!
   const latest = useStore((s) => items.map((t) => s.messages.findLast((m) => m.run?.delegation?.id === t.id && m.run.delegation.from === message.id)))
   const agents = useStore((s) => items.map((t) => agentById(s, t.agentId)))
+  // A task that waits for my approval elsewhere: its card shows here too, so I decide without leaving.
+  const waiting = useStore((s) => latest.map((m) => (m?.run?.status === 'waiting_approval' && m.run.approvalId ? s.approvals.find((a) => a.id === m.run!.approvalId && a.state === 'pending') : undefined)))
   const stateOf = (m: Message | undefined): { label: string; tone: string } => {
     const st = m?.run?.status
     if (!m || st === 'working') return { label: L('trabalhando', 'working'), tone: 'tag--warn' }
@@ -297,18 +299,22 @@ function Handoffs({ message }: { message: Message }): ReactNode {
         const agent = agents[i]
         const state = stateOf(latest[i])
         const elsewhere = t.conversationId && t.conversationId !== message.conversationId
+        const approval = elsewhere ? waiting[i] : undefined
         return (
-          <div key={t.id} className="handoff" title={t.task}>
-            <Icon name="send" size={12} />
-            {agent && <AgentAvatar agent={agent} size={16} />}
-            <span className="handoff__who">{agent?.name ?? L('agente removido', 'removed agent')}</span>
-            <span className="handoff__task">{t.task}</span>
-            <span className={`tag ${state.tone}`}>{state.label}</span>
-            {elsewhere && (
-              <button className="link handoff__open" onClick={() => navigate({ kind: 'conversation', id: t.conversationId! })}>
-                {L('abrir conversa', 'open conversation')}
-              </button>
-            )}
+          <div key={t.id} className="handoff__item">
+            <div className="handoff" title={t.task}>
+              <Icon name="send" size={12} />
+              {agent && <AgentAvatar agent={agent} size={16} />}
+              <span className="handoff__who">{agent?.name ?? L('agente removido', 'removed agent')}</span>
+              <span className="handoff__task">{t.task}</span>
+              <span className={`tag ${state.tone}`}>{state.label}</span>
+              {elsewhere && (
+                <button className="link handoff__open" onClick={() => navigate({ kind: 'conversation', id: t.conversationId! })}>
+                  {L('abrir conversa', 'open conversation')}
+                </button>
+              )}
+            </div>
+            {approval && <ApprovalCard approval={approval} compact />}
           </div>
         )
       })}
