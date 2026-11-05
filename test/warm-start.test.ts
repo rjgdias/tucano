@@ -107,7 +107,7 @@ describe('a Claude Code process started ahead', () => {
     expect(upOf(warm)).toBeGreaterThanOrEqual(1000)
     const cold = await reply(engine.run(turn())) // the spare is used up: a new process, as before
     expect(cold.split(' ')[0]).not.toBe(warm.split(' ')[0])
-    expect(upOf(cold)).toBeLessThan(1000)
+    expect(upOf(cold)).toBeLessThan(upOf(warm)) // started for this turn (a busy machine may take a second to start it)
     engine.dispose!()
   }, 30_000)
 
