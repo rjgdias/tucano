@@ -50,7 +50,7 @@ const of = (id: string): Message[] => db.messages().filter((m) => m.author.kind 
 
 beforeEach(async () => {
   db = new Db(join(mkdtempSync(join(tmpdir(), 'aq-db-')), 'test.db'))
-  settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, gemini: ready, cursor: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
+  settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, gemini: ready, cursor: ready, grok: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
   db.saveAgent(agent('dev', 'Engenharia'))
   db.saveAgent(agent('ana', 'Dados'))
   db.createConversation({ id: 'c', kind: 'channel', name: 'geral', members: ['dev', 'ana'] })
@@ -63,7 +63,7 @@ afterEach(() => gateway.stop())
 
 describe('an agent does one thing at a time', () => {
   it('what comes for a busy agent waits, shown as queued, and goes in order; others work meanwhile', async () => {
-    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor') }
+    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
     const r = new Runner({ db, engines, settings: async () => settings, emit: () => {}, workDir: mkdtempSync(join(tmpdir(), 'aq-w-')), gateway })
 
     await r.send('c', '@dev revisa o PR 12')
@@ -90,7 +90,7 @@ describe('an agent does one thing at a time', () => {
   })
 
   it('stopping a reply that is still queued cancels it: it never starts', async () => {
-    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor') }
+    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
     const r = new Runner({ db, engines, settings: async () => settings, emit: () => {}, workDir: mkdtempSync(join(tmpdir(), 'aq-w-')), gateway })
     await r.send('c', '@dev revisa o PR 12')
     await until(() => turns.length === 1)
@@ -109,7 +109,7 @@ describe('an agent does one thing at a time', () => {
 describe('a reply waiting its turn', () => {
   const run = (): { r: Runner; events: Message[] } => {
     const events: Message[] = []
-    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor') }
+    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
     const r = new Runner({ db, engines, settings: async () => settings, emit: (e) => e.type === 'message' && events.push(e.message), workDir: mkdtempSync(join(tmpdir(), 'aq-w-')), gateway })
     return { r, events }
   }

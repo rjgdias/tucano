@@ -52,7 +52,7 @@ function runner(): Runner {
   removed = []
   routerGates = []
   gates = []
-  const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor') }
+  const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
   return new Runner({ dataDir: DATA, db, engines, settings: async () => settings, emit: (e) => (e.type === 'message' ? events.push(e.message) : e.type === 'message_removed' ? removed.push(e.id) : 0), workDir: mkdtempSync(join(tmpdir(), 'mq-w-')), gateway })
 }
 
@@ -65,7 +65,7 @@ const replies = (): Message[] => db.messages().filter((m) => m.author.kind === '
 
 beforeEach(async () => {
   db = new Db(join(mkdtempSync(join(tmpdir(), 'mq-db-')), 'test.db'))
-  settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, gemini: ready, cursor: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
+  settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, gemini: ready, cursor: ready, grok: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
   db.saveAgent({ id: 'teo', name: 'Teo', handle: 'teo', role: '', color: 'sky', instructions: '', modelId: 'sonnet', effort: 'low', limit: 1_000_000, used: 0, grants: {}, memory: 'auto', computer: false, archived: false })
   db.createConversation({ id: 'dm', kind: 'dm', name: 'teo', members: ['teo'] })
   gateway = new Gateway()
@@ -181,7 +181,7 @@ describe('a message waiting for an agent on a task someone handed it', () => {
     // Chefe is the usual fake (it delegates); Teo works until it's let go.
     const fast = fakeEngine('claude', { delayMs: 1 })
     const mixed: Engine = { id: 'claude', run: (t) => (t.system.startsWith('Você é Teo') ? slow.run(t) : fast.run(t)) }
-    const engines: Record<EngineId, Engine> = { claude: mixed, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor') }
+    const engines: Record<EngineId, Engine> = { claude: mixed, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
     const r = new Runner({ db, engines, settings: async () => settings, emit: (e) => e.type === 'message' && events.push(e.message), workDir: mkdtempSync(join(tmpdir(), 'mq-w-')), gateway })
 
     await r.send('dm-chefe', 'delegue a @teo: revisar o PR 12')
