@@ -408,12 +408,12 @@ describe('what a thread message sets off stays in the thread', () => {
 describe('the database', () => {
   it("opens a database whose migrations ran in another order (a test build's), adding what it lacks", () => {
     const file = join(mkdtempSync(join(tmpdir(), 'ad-db-')), 'next.db')
-    // Made before main's thread summaries and threads per conversation: the team's migrations took
-    // their slots, so the version is two short and the request column, now last, is already there.
+    // Made before main's thread summaries, threads per conversation and unread counts: the team's migrations
+    // took their slots, so the version is three short and the request column, now last, is already there.
     new Db(file).close()
     const raw = new DatabaseSync(file)
     const { user_version } = raw.prepare('PRAGMA user_version').get() as { user_version: number }
-    raw.exec(`ALTER TABLE messages DROP COLUMN thread_summary; ALTER TABLE conversations DROP COLUMN threads; PRAGMA user_version = ${user_version - 2};`)
+    raw.exec(`ALTER TABLE messages DROP COLUMN thread_summary; ALTER TABLE conversations DROP COLUMN threads; DROP TABLE message_notifications; PRAGMA user_version = ${user_version - 3};`)
     raw.exec("INSERT INTO conversations (id, kind, name, created_at) VALUES ('c1', 'channel', 'geral', 1)")
     raw.exec("INSERT INTO messages (id, conversation_id, author_kind, text, at) VALUES ('m1', 'c1', 'me', 'oi', 1)")
     raw.close()
@@ -432,12 +432,12 @@ describe('the database', () => {
   it('an existing database gains thread_id, thread_summary and threads, and round-trips them', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'ad-db-')), 'old.db')
     // A database from before threads, with a message in it: the schema back to before the threads'
-    // migration, undoing the four that came after it (the thread summaries, threads per conversation, the team and the DMs between agents).
+    // migration, undoing the five that came after it (the thread summaries, threads per conversation, the unread one, the team and the DMs between agents).
     new Db(file).close()
     const raw = new DatabaseSync(file)
     const { user_version } = raw.prepare('PRAGMA user_version').get() as { user_version: number }
     raw.exec(
-      `ALTER TABLE conversations DROP COLUMN request; ALTER TABLE conversations DROP COLUMN pair; ALTER TABLE agents DROP COLUMN team; ALTER TABLE conversations DROP COLUMN threads; ALTER TABLE messages DROP COLUMN thread_summary; DROP INDEX messages_by_thread; ALTER TABLE messages DROP COLUMN thread_id; PRAGMA user_version = ${user_version - 5};`
+      `ALTER TABLE conversations DROP COLUMN request; ALTER TABLE conversations DROP COLUMN pair; ALTER TABLE agents DROP COLUMN team; ALTER TABLE conversations DROP COLUMN threads; ALTER TABLE messages DROP COLUMN thread_summary; DROP INDEX messages_by_thread; ALTER TABLE messages DROP COLUMN thread_id; PRAGMA user_version = ${user_version - 6};`
     )
     raw.exec("INSERT INTO conversations (id, kind, name, created_at) VALUES ('c1', 'channel', 'geral', 1)")
     raw.exec("INSERT INTO messages (id, conversation_id, author_kind, text, at) VALUES ('old', 'c1', 'me', 'antes das threads', 1)")

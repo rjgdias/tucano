@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Agent, EngineId, Message, Settings } from '../src/shared/types'
+import type { Agent, Conversation, EngineId, Message, Settings } from '../src/shared/types'
 import { Db } from '../src/core/db'
 import { fakeEngine } from '../src/core/engines/fake'
 import type { Engine, Turn } from '../src/core/engines/types'
@@ -61,59 +61,19 @@ beforeEach(async () => {
 })
 afterEach(() => gateway.stop())
 
-describe('an agent does one thing at a time', () => {
-  it('what comes for a busy agent waits, shown as queued, and goes in order; others work meanwhile', async () => {
-    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
-    const r = new Runner({ db, engines, settings: async () => settings, emit: () => {}, workDir: mkdtempSync(join(tmpdir(), 'aq-w-')), gateway })
-
-    await r.send('c', '@dev revisa o PR 12')
-    await until(() => turns.length === 1)
-    // Another subject, in another thread: work of its own for dev, not more of the same.
-    db.saveMessage({ id: 'old', conversationId: 'c', author: { kind: 'me' }, text: 'o build de ontem', at: 1 })
-    await r.send('c', '@dev depois olha o build', [], 'old')
-    await r.send('c', '@ana quantos pedidos ontem?')
-    await until(() => turns.length === 2)
-
-    // Ana works at once; dev's second request waits, already in the conversation as queued.
-    expect(turns.map(who)).toEqual(['dev', 'ana'])
-    const queued = of('dev').find((m) => m.run?.steps[0]?.label === 'Na fila')
-    expect(queued?.run?.status).toBe('working')
-
-    releaseOldest() // dev's first is done: its second starts, in the reply that waited
-    await until(() => turns.length === 3)
-    expect(who(turns[2]!)).toBe('dev')
-    releaseOldest()
-    releaseOldest()
-    await r.idle()
-    expect(of('dev').map((m) => m.run?.status)).toEqual(['done', 'done'])
-    expect(of('dev')[1]!.id).toBe(queued!.id) // the queued reply is the one that answered
-  })
-
-  it('stopping a reply that is still queued cancels it: it never starts', async () => {
-    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
-    const r = new Runner({ db, engines, settings: async () => settings, emit: () => {}, workDir: mkdtempSync(join(tmpdir(), 'aq-w-')), gateway })
-    await r.send('c', '@dev revisa o PR 12')
-    await until(() => turns.length === 1)
-    db.saveMessage({ id: 'old', conversationId: 'c', author: { kind: 'me' }, text: 'o build de ontem', at: 1 })
-    await r.send('c', '@dev depois olha o build', [], 'old')
-    const queued = of('dev').find((m) => m.run?.steps[0]?.label === 'Na fila')!
-    r.stop(queued.id)
-    expect(db.message(queued.id)!.run).toMatchObject({ status: 'stopped', steps: [{ label: 'Cancelado' }] })
-    releaseOldest()
-    await r.idle()
-    expect(turns).toHaveLength(1) // dev's second never ran
-    expect(db.message(queued.id)!.run?.status).toBe('stopped')
-  })
-})
-
-describe('a reply waiting its turn', () => {
+describe('an agent does one thing at a time in each place', () => {
   const run = (): { r: Runner; events: Message[] } => {
     const events: Message[] = []
     const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
     const r = new Runner({ db, engines, settings: async () => settings, emit: (e) => e.type === 'message' && events.push(e.message), workDir: mkdtempSync(join(tmpdir(), 'aq-w-')), gateway })
     return { r, events }
   }
-  const waitingReply = (id: string): Message | undefined => of(id).find((m) => m.run?.steps[0]?.label === 'Na fila')
+  // A turn for an agent already replying there, as a team's work asks for it: it waits its turn.
+  const startAnother = (r: Runner, conv: string): void => {
+    const runner = r as unknown as { start(agent: Agent, conv: Conversation, opts: { depth: number; task?: string }): void }
+    runner.start(db.agent('dev')!, db.conversation(conv)!, { depth: 2, task: 'olha o build' })
+  }
+  const waitingReply = (): Message | undefined => of('dev').find((m) => m.run?.steps[0]?.label === 'Na fila')
   const finish = async (r: Runner): Promise<void> => {
     let done = false
     void r.idle().then(() => (done = true))
@@ -124,81 +84,102 @@ describe('a reply waiting its turn', () => {
     expect(done).toBe(true)
   }
 
-  it('an agent calling a busy agent: its reply waits over the field and goes in when it starts, after what came meanwhile', async () => {
-    const { r, events } = run()
+  it('my next message waits for the agent replying there, and others work meanwhile', async () => {
+    const { r } = run()
+    await r.send('c', '@dev revisa o PR 12')
+    await until(() => turns.length === 1)
+    await r.send('c', '@dev depois olha o build')
+    await r.send('c', '@ana quantos pedidos ontem?')
+    await until(() => turns.length === 2)
+    expect(turns.map(who)).toEqual(['dev', 'ana'])
+    releaseOldest() // dev's first is done: the one follow-up reads what waited
+    await until(() => turns.length === 3)
+    expect(who(turns[2]!)).toBe('dev')
+    expect(turns[2]!.prompt).toContain('olha o build')
+    await finish(r)
+    expect(of('dev').map((m) => m.run?.status)).toEqual(['done', 'done'])
+  })
+
+  it('in another thread or conversation the same agent works at once', async () => {
+    db.createConversation({ id: 'd', kind: 'dm', name: 'dev', members: ['dev'] })
+    const { r } = run()
+    await r.send('c', '@dev revisa o PR 12')
+    await until(() => turns.length === 1)
+    db.saveMessage({ id: 'old', conversationId: 'c', author: { kind: 'me' }, text: 'o build de ontem', at: 1 })
+    await r.send('c', '@dev depois olha o build', [], 'old')
+    await r.send('d', 'e os testes?')
+    await until(() => turns.length === 3)
+    expect(waitingReply()).toBeUndefined()
+    await finish(r)
+  })
+
+  it('an agent calling one already replying there: no second reply beside it, one more right after', async () => {
+    const { r } = run()
     await r.send('c', '@dev revisa o PR 12')
     await until(() => turns.length === 1)
     say['ana'] = '@dev pode olhar o build também?'
     await r.send('c', '@ana olha os números')
     await until(() => turns.length === 2)
-    gates[1]!() // Ana answers and calls Dev, who is busy
-    gates.splice(1, 1)
-    await until(() => !!waitingReply('dev'))
-    const waiting = waitingReply('dev')!
-    expect(events.findLast((m) => m.id === waiting.id)?.queued).toBe('dev')
-    expect(turns).toHaveLength(2) // Dev hasn't started it
-
-    await r.send('c', '@ana e os de ontem?') // comes in while Dev's reply waits
+    gates.splice(1, 1)[0]!() // Ana answers and calls Dev, who is replying
+    await until(() => of('ana')[0]?.run?.status === 'done' && !!of('ana')[0]?.run?.steps.some((s) => s.label === 'Chamou'))
+    expect(turns).toHaveLength(2)
+    expect(waitingReply()).toBeUndefined()
+    const called = of('ana')[0]!
+    releaseOldest() // Dev is done: it answers once, after what came meanwhile
     await until(() => turns.length === 3)
-    const meanwhile = db.messages().findLast((m) => m.text === '@ana e os de ontem?')!
+    expect(who(turns[2]!)).toBe('dev')
+    await finish(r)
+    expect(of('dev')).toHaveLength(2)
+    expect(of('dev')[1]!.at).toBeGreaterThan(called.at)
+  })
 
-    releaseOldest() // Dev is done with the PR: the waiting reply starts
+  it('a reply that has to wait stays over the field, and goes in when it starts, after what came meanwhile', async () => {
+    const { r, events } = run()
+    await r.send('c', '@dev revisa o PR 12')
+    await until(() => turns.length === 1)
+    startAnother(r, 'c')
+    const waiting = waitingReply()!
+    expect(events.findLast((m) => m.id === waiting.id)?.queued).toBe('dev')
+    expect(turns).toHaveLength(1)
+    await r.send('c', '@ana quantos pedidos ontem?')
+    await until(() => turns.length === 2)
+    const meanwhile = db.messages().findLast((m) => m.text === '@ana quantos pedidos ontem?')!
+    releaseOldest()
     await until(() => turns.filter((x) => who(x) === 'dev').length === 2)
     const started = events.findLast((m) => m.id === waiting.id)!
     expect(started.queued).toBeUndefined()
-    expect(started.at).toBeGreaterThan(meanwhile.at) // in the conversation after it, not where it was asked
+    expect(started.at).toBeGreaterThan(meanwhile.at)
     expect(db.message(waiting.id)!.at).toBe(started.at)
     await finish(r)
+    expect(of('dev').map((m) => m.run?.status)).toEqual(['done', 'done'])
   })
 
   it('cancelled while it waits: it never runs, and shows in the conversation as cancelled', async () => {
     const { r, events } = run()
     await r.send('c', '@dev revisa o PR 12')
     await until(() => turns.length === 1)
-    db.saveMessage({ id: 'old', conversationId: 'c', author: { kind: 'me' }, text: 'o build de ontem', at: 1 })
-    await r.send('c', '@dev depois olha o build', [], 'old')
-    const waiting = waitingReply('dev')!
+    startAnother(r, 'c')
+    const waiting = waitingReply()!
     r.stop(waiting.id)
     const last = events.findLast((m) => m.id === waiting.id)!
     expect(last.queued).toBeUndefined()
     expect(last.run?.status).toBe('stopped')
+    expect(db.message(waiting.id)!.run).toMatchObject({ status: 'stopped', steps: [{ label: 'Cancelado' }] })
     await finish(r)
     expect(turns).toHaveLength(1)
-  })
-
-  it('busy in another conversation: my two messages in a DM wait, and get one reply and one follow-up', async () => {
-    db.createConversation({ id: 'd', kind: 'dm', name: 'dev', members: ['dev'] })
-    const { r, events } = run()
-    await r.send('c', '@dev revisa o PR 12')
-    await until(() => turns.length === 1)
-    await r.send('d', 'teste')
-    await r.send('d', 'teste 2')
-    const second = db.messages().find((m) => m.text === 'teste 2')!
-    expect(events.findLast((m) => m.id === second.id)?.queued).toBe('dev') // in the queue, not a reply of its own
-    expect(of('dev').filter((m) => m.conversationId === 'd')).toHaveLength(1)
-    releaseOldest()
-    await until(() => turns.length === 2)
-    expect(turns[1]!.prompt).toContain('teste')
-    releaseOldest()
-    await until(() => turns.length === 3)
-    expect(turns[2]!.prompt).toContain('teste 2')
-    await finish(r)
-    expect(turns).toHaveLength(3)
-    expect(db.messages().filter((m) => m.conversationId === 'd').map((m) => m.text)).toEqual(['teste', 'feito', 'teste 2', 'feito'])
   })
 
   it('reading everything again (a window reload) keeps what waits out of the conversation', async () => {
     db.createConversation({ id: 'd', kind: 'dm', name: 'dev', members: ['dev'] })
     const { r } = run()
-    await r.send('c', '@dev revisa o PR 12')
-    await until(() => turns.length === 1)
     await r.send('d', 'teste')
+    await until(() => turns.length === 1)
     await r.send('d', 'teste 2')
+    startAnother(r, 'd')
     const seen = r.withQueue(db.messages())
     expect(seen.find((m) => m.text === 'teste 2')?.queued).toBe('dev')
-    expect(seen.find((m) => m.text === 'teste')?.queued).toBeUndefined() // it reached the agent's line of work
-    expect(seen.find((m) => m.conversationId === 'd' && m.author.kind === 'agent')?.queued).toBe('dev')
-    expect(seen.find((m) => m.text === '@dev revisa o PR 12')?.queued).toBeUndefined()
+    expect(seen.find((m) => m.text === 'teste')?.queued).toBeUndefined()
+    expect(seen.find((m) => m.run?.steps[0]?.label === 'Na fila')?.queued).toBe('dev')
     await finish(r)
     expect(r.withQueue(db.messages()).some((m) => m.queued)).toBe(false)
   })

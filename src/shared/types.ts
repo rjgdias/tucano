@@ -194,6 +194,7 @@ export interface Run {
   task?: string // what this reply was asked beyond the conversation; kept only while it can be tried again or go on
   work?: string // the piece of work it counts toward, e.g. the issue "OAB-65" (spec §20)
   agentDraft?: AgentDraft // an agent the Tuca proposed with propor_agente, shown as a card
+  proposal?: Proposal // what an agent proposed (a change to an agent, a routine, a channel, a team), shown as a card
   delegation?: Delegation // this reply works on a task another agent handed it
   delegated?: Delegated[] // the tasks this reply handed its team; it waits for their results
   round?: number // how many times in a row this agent got its team's results back without a human message
@@ -247,6 +248,19 @@ export interface AgentDraft {
   agentId?: string // once created
 }
 
+// What the Tuca may propose to change in an agent that exists.
+export type AgentChanges = Partial<Pick<Agent, 'name' | 'role' | 'instructions' | 'modelId' | 'effort' | 'web' | 'grants' | 'limit'>>
+
+// A change an agent proposes to what exists, or a new routine, channel or team: a card under its message
+// with Aplicar and Descartar. Nothing changes until the person applies it. `appliedId`: the agent,
+// routine or channel it made or changed; `error`: why applying it didn't work.
+export type Proposal = (
+  | { kind: 'agent'; agentId: string; changes: AgentChanges; before?: AgentChanges } // before: those fields as they were
+  | { kind: 'routine'; routine: RoutineInput }
+  | { kind: 'channel'; name: string; topic?: string; members: string[]; threads?: boolean }
+  | { kind: 'team'; agents: AgentDraft[]; channel?: { name: string; topic?: string; threads?: boolean } } // several agents at once, and a channel with them
+) & { reason?: string; state?: 'applied' | 'dismissed'; appliedId?: string }
+
 export type Author = { kind: 'me' } | { kind: 'agent'; id: string } | { kind: 'system' } | { kind: 'routine'; id: string }
 
 export interface Message {
@@ -297,10 +311,12 @@ export interface VoiceStatus {
 export interface LocalInfo {
   kind: 'image' | 'video' | 'pdf' | 'folder' | 'file'
   url?: string // to see it here: images and videos
+  download?: string // on a server, where the file isn't on this computer: to save it here
 }
 
 export interface Settings {
-  workspaceName: string
+  workspaceName: string // the person's name: what the agents call them
+  workspaceLabel?: string // the workspace's own name, in the switcher; unset: workspaceName
   // A script (bash, as root) every new Linux computer is set up with: the tools the agents use (glab, the
   // Databricks CLI…). Run once into a base image, which each new computer starts from.
   computerSetup?: string
@@ -330,11 +346,10 @@ export interface Settings {
   paused?: boolean // "Pausar tudo": no agent starts working, no routine runs
   quietHours?: { from: string; to: string } | null // "HH:MM": routines and triggers wait, and run late when it ends; null: off
   quota?: Quota // the Claude subscription's windows, from the last reply (spec §21)
-  github?: { user?: string; error?: string } // computed: the GitHub account the app pushes and opens PRs with (spec §22)
   // The harnesses agents may run on, picked in the introduction. Unset: every one that's ready.
   harnesses?: EngineId[]
   // The first-run introduction: unset on an existing install (no intro), done:false to show it (a new install, or "Rever a introdução")
-  onboarding?: { done: boolean; checklistHidden?: boolean }
+  onboarding?: { done: boolean; checklistHidden?: boolean; workspaceManagerSeen?: boolean; carried?: boolean } // carried: the general settings came from another workspace
   folded?: string[] // the ids of what I folded in the sidebar
   sounds?: boolean // the toucan's chirp on a notification; unset: on
   seenVersion?: string // the last version whose news I closed; an update past it shows what's new once
@@ -377,6 +392,9 @@ export interface BrowserElement {
   checked?: boolean
   disabled?: boolean
   inView: boolean
+  focused?: boolean // where a key goes now
+  multiline?: boolean // a text area or an editable block: Enter there often sends (a comment, a message)
+  submits?: string // a field in a form: the label of the button that sends it (what Enter does)
 }
 
 export interface BrowserReply {
