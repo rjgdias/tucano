@@ -198,7 +198,7 @@ export function ConversationView({ id }: { id: string }): ReactNode {
             <button className={`btn btn--ghost ${showSummary ? 'is-active' : ''}`} title={L('O que esta conversa já cobriu', 'What this conversation has covered')} onClick={() => setShowSummary(!showSummary)}>
               <Icon name="book" size={14} /> {L('Resumo', 'Summary')}
             </button>
-            {dmAgent && (
+            {(dmAgent || pair) && (
               <button className="icon-btn" title={L('Configurações da conversa', 'Conversation settings')} aria-label={L('Configurações da conversa', 'Conversation settings')} onClick={() => openDialog({ kind: 'settings', id })}>
                 <Icon name="gear" size={16} />
               </button>
