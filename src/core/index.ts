@@ -39,6 +39,7 @@ import { checkJevKey, JEV_MODEL, JEV_SECRET } from './jev'
 import { report } from './report'
 import { usage } from './usage'
 import { Skills } from './skills'
+import { deleteAgent } from './agent-delete'
 import { Wiki } from './wiki'
 import { WikiCurator } from './wiki-curator'
 import { WikiReviewer } from './wiki-review'
@@ -815,6 +816,16 @@ function settleDraft(messageId: string, agentId?: string): void {
 }
 
 
+function dropConversation(id: string): void {
+  if (!db.conversation(id)) return
+  for (const m of db.messages()) if (m.conversationId === id && (m.run?.status === 'working' || m.run?.status === 'waiting_approval')) runner.stop(m.id)
+  for (const r of db.routines()) if (r.conversationId === id) routines.remove(r.id)
+  for (const a of db.approvals()) if (a.conversationId === id && a.state === 'pending' && db.decideApproval(a.id, 'expired', L('O canal foi excluído.', 'The channel was deleted.'))) emit({ type: 'approval', approval: db.approvals().find((x) => x.id === a.id)! })
+  runner.forgetSessions({ conversationId: id })
+  db.deleteConversation(id)
+  emit({ type: 'conversation_removed', id })
+}
+
 const api: Api = {
   markRead: ({ conversationId }) => {
     db.markRead(conversationId)
@@ -877,6 +888,7 @@ const api: Api = {
 
   saveAgent: ({ agent, channelIds }) => {
     const before = db.agent(agent.id)
+    if (before?.kind === 'removed') throw new Error(L('Esse agente foi excluído.', 'That agent was deleted.'))
     // Archived changes only through archiveAgent, which also stops what the agent was doing.
     const clean: Agent = { ...cleanLook(agent), name: agent.name.trim(), handle: agent.handle.trim().toLowerCase(), archived: before?.archived ?? false }
     const linux = (a?: Agent): boolean => !!a?.computer && a.computerKind !== 'mac'
@@ -904,7 +916,7 @@ const api: Api = {
   // its routines turn off, its browser closes. Its channels and settings stay for when it comes back.
   archiveAgent: ({ id, archived }) => {
     const agent = db.agent(id)
-    if (!agent || agent.archived === archived) return
+    if (!agent || agent.kind === 'removed' || agent.archived === archived) return
     if (archived) {
       for (const m of db.messages()) if (m.author.kind === 'agent' && m.author.id === id && (m.run?.status === 'working' || m.run?.status === 'waiting_approval')) runner.stop(m.id)
       routines.pauseAgent(id)
@@ -914,6 +926,27 @@ const api: Api = {
     db.saveAgent({ ...agent, archived })
     emit({ type: 'agent', agent: db.agent(id)! })
     emitConversations()
+  },
+
+  deleteAgent: ({ id }) => {
+    void deleteAgent(id, {
+      db,
+      emit,
+      emitConversations,
+      workDir: join(dataDir, 'agents'),
+      stopRun: (messageId) => runner.stop(messageId),
+      forgetSessions: (agentId) => runner.forgetSessions({ agentId }),
+      removeRoutine: (routineId) => routines.remove(routineId),
+      deleteConversation: dropConversation,
+      forgetMemories: (agentId) => memory.forgetAgent(agentId),
+      forgetSkills: (agentId) => skills.forgetAgent(agentId),
+      eraseComputer: async (agent) => {
+        if (agent.computer && agent.computerKind === 'mac') await computers.mac.erase(agent.id)
+        // Also for a computer since turned off: its container and files wait for it to be turned back on.
+        if (agent.computer || existsSync(join(dataDir, 'computers', agent.id))) await computers.erase(agent.id)
+      },
+      eraseBrowser: (agent) => browser.action(agent, 'clear')
+    })
   },
   renameChannel: ({ id, name }) => {
     const conv = db.conversation(id)
@@ -955,15 +988,9 @@ const api: Api = {
 
   deleteConversation: ({ id }) => {
     const conv = db.conversation(id)
-    if (!conv) return
-    if (conv.kind === 'agents' && requestRunning(conv, db.messages()))
+    if (conv?.kind === 'agents' && requestRunning(conv, db.messages()))
       throw new Error(L('Esse pedido ainda está em andamento. Dá pra apagar a conversa quando ele terminar.', "That request is still going. The conversation can be deleted once it's over."))
-    for (const m of db.messages()) if (m.conversationId === id && (m.run?.status === 'working' || m.run?.status === 'waiting_approval')) runner.stop(m.id)
-    for (const r of db.routines()) if (r.conversationId === id) routines.remove(r.id)
-    for (const a of db.approvals()) if (a.conversationId === id && a.state === 'pending' && db.decideApproval(a.id, 'expired', L('O canal foi excluído.', 'The channel was deleted.'))) emit({ type: 'approval', approval: db.approvals().find((x) => x.id === a.id)! })
-    runner.forgetSessions({ conversationId: id })
-    db.deleteConversation(id)
-    emit({ type: 'conversation_removed', id })
+    dropConversation(id)
   },
 
   createChannel: ({ name, threads }) => {
@@ -1032,6 +1059,7 @@ const api: Api = {
   },
   dismissProposal: ({ messageId }) => settleProposal(messageId),
   openDm: ({ agentId }) => {
+    if (db.agent(agentId)?.kind === 'removed') throw new Error(L('Esse agente foi excluído.', 'That agent was deleted.'))
     const existing = db.conversations().find((c) => c.kind === 'dm' && c.name === agentId)
     if (existing) return existing.id
     const id = randomUUID()

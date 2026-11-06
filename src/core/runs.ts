@@ -1059,6 +1059,7 @@ export class Runner {
     const settings = await this.deps.settings()
     this.budget = settings.requestBudget ?? REQUEST_BUDGET
     agent = db.agent(agent.id) ?? agent // limits or instructions may have changed while queued
+    if (agent.kind === 'removed') throw new Error(`agent ${agent.id} was deleted while its reply was queued`)
     const model = modelInfo(agent.modelId)
     // The model this reply runs on: the agent's, or its reserve once the main one's subscription is out.
     let modelId = agent.modelId
@@ -1390,7 +1391,7 @@ ${note}`,
             workspaceState(args['area'], {
               settings: await this.deps.settings(),
               connectors: this.deps.connectors?.list() ?? [],
-              agents: db.agents().filter((a) => a.kind !== 'tuca'),
+              agents: db.agents().filter((a) => a.kind !== 'tuca' && a.kind !== 'removed'),
               conversations: db.conversations(),
               routines: db.routines(),
               approvals: db.approvals(),

@@ -92,7 +92,7 @@ export interface Agent {
   // The agents it coordinates: it may hand them tasks with `delegar`, and their results come back to it.
   team?: string[]
   archived: boolean
-  kind?: 'tuca' // the agent that builds the others: it proposes, the person creates
+  kind?: 'tuca' | 'removed' // 'tuca': the agent that builds the others, it proposes and the person creates; 'removed': deleted, only its name and look stay, for its old messages (always archived too)
 }
 
 // One of the person's apps given to an agent, by the name the system shows.

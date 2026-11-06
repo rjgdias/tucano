@@ -524,7 +524,7 @@ export class Db {
       folders: JSON.parse(str(r['folders']) || '[]') as LentFolder[],
       team: JSON.parse(str(r['team']) || '[]') as string[],
       archived: r['archived'] === 1,
-      ...(str(r['kind']) === 'tuca' ? { kind: 'tuca' as const } : {})
+      ...(str(r['kind']) === 'tuca' ? { kind: 'tuca' as const } : str(r['kind']) === 'removed' ? { kind: 'removed' as const } : {})
     }
   }
 
