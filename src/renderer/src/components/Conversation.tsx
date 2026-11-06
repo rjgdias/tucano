@@ -1,8 +1,9 @@
 import { L, lang, locale } from '../../../shared/lang'
-import { CODE_SPANS } from '../../../shared/types'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import Markdown, { defaultUrlTransform } from 'react-markdown'
-import { LOCAL_LINK, remarkLocalPaths } from '../../../shared/path-text'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react'
+import Markdown, { type ExtraProps } from 'react-markdown'
+import { safeUrl } from '../links'
+import { remarkLocalPaths } from '../../../shared/path-text'
+import { remarkMentions, splitMentions } from '../../../shared/mention-text'
 import { localLinkFor } from './LocalLink'
 import remarkGfm from 'remark-gfm'
 import { KeepInWiki, WikiChip, WikiLink, wikiLinks } from './Wiki'
@@ -14,6 +15,7 @@ import {
   decideMemory,
   describeSchedule,
   editSummary,
+  editThreadSummary,
   ENGINES,
   forgetMemory,
   modelById,
@@ -26,12 +28,18 @@ import {
   removeRoutine,
   retryRun,
   continueRun,
+  steer,
+  editQueued,
+  cancelQueued,
   ACCESS_REQUEST,
+  ROUTING,
   countedTokens,
   sendMessage,
+  typing,
   setTab,
   stopRun,
   summarizeNow,
+  summarizeThreadNow,
   useStore,
   SUMMARY_MAX_AFTER,
   SUMMARY_WINDOW,
@@ -49,12 +57,12 @@ import {
   transcribe,
   voiceStatus
 } from '../store'
-import { AgentAvatar, Icon, MeAvatar, ago, duration, time, tokens, usd, useJustEnded } from './ui'
+import { AgentAvatar, Icon, MeAvatar, ago, ownColor, duration, time, tokens, usd, useJustEnded } from './ui'
 import { canRecord, NoSound, record, type Recording } from '../voice'
 import { useVoice, VoicePopover } from './VoiceSetup'
 import { ArtifactCard, BrowserCard, ServiceCard, SidePanel } from './Panel'
 import { when } from './Routines'
-import { AgentProposal } from './Tuca'
+import { AgentProposal, ProposalCard } from './Tuca'
 import { FoldToggle } from './Fold'
 
 // Something exact a person may want to check (the raw error, a tool's arguments), folded until asked.
@@ -112,7 +120,8 @@ export function ConversationView({ id }: { id: string }): ReactNode {
     const all = conv.members.map((m) => agentById(s, m)).filter((a): a is Agent => !!a)
     return conv.kind === 'dm' ? all : all.filter(isTeam)
   })
-  const messages = useStore((s) => s.messages.filter((m) => m.conversationId === id))
+  // A message waiting in line isn't in the conversation yet: it's over the field until the agent reads it.
+  const messages = useStore((s) => s.messages.filter((m) => m.conversationId === id && !m.queued))
   const focus = useStore((s) => (s.view?.kind === 'conversation' && s.view.id === id ? s.view.message : undefined))
   const thread = useStore((s) => (s.panel?.kind === 'thread' ? s.panel.id : undefined))
   const [showSummary, setShowSummary] = useState(false)
@@ -140,9 +149,15 @@ export function ConversationView({ id }: { id: string }): ReactNode {
       <section className="conversation">
         <header className="topbar">
           <div className="topbar__title">
-            {dmAgent ? <AgentAvatar agent={dmAgent} size={22} /> : <Icon name="hash" />}
-            <h1>{title}</h1>
-            {dmAgent && <span className="tag">{dmAgent.role}</span>}
+            <button className="topbar__name" title={conv.kind === 'channel' ? L('Configurações do canal', 'Channel settings') : L('Configurações da conversa', 'Conversation settings')} onClick={() => openDialog({ kind: 'settings', id })}>
+              {dmAgent ? <AgentAvatar agent={dmAgent} size={22} /> : <Icon name="hash" />}
+              <h1>{title}</h1>
+            </button>
+            {dmAgent?.role && (
+              <span className="tag topbar__role" title={dmAgent.role}>
+                {dmAgent.role}
+              </span>
+            )}
             {conv.topic && <span className="topbar__topic">{conv.topic}</span>}
           </div>
           <div className="topbar__actions">
@@ -186,6 +201,7 @@ const NO_REPLIES: Message[] = []
 export function MessageList({ messages: all, conversationId, empty, focus, threads, lead }: { messages: Message[]; conversationId: string; empty?: boolean; focus?: string; threads?: boolean; lead?: ReactNode }): ReactNode {
   const ref = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
+  const [farFromBottom, setFarFromBottom] = useState(false)
   const { messages, replies } = useMemo(() => {
     if (!threads) return { messages: all, replies: undefined }
     const replies = new Map<string, Message[]>()
@@ -218,6 +234,7 @@ export function MessageList({ messages: all, conversationId, empty, focus, threa
 
   useEffect(() => {
     if (!lead) stick.current = true
+    setFarFromBottom(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId])
 
@@ -226,12 +243,17 @@ export function MessageList({ messages: all, conversationId, empty, focus, threa
     if (el && stick.current) el.scrollTop = el.scrollHeight
   })
 
-  // A thread opens on the message that started it: the replies follow below.
+  // A thread opens at its latest message, like Slack: the message that started it is a scroll up.
+  // Once more on the next frame, for what lays out a little late (code blocks, images).
   useLayoutEffect(() => {
     const el = ref.current
     if (!lead || !el) return
-    el.scrollTop = 0
-    stick.current = el.scrollHeight - el.clientHeight < 60
+    stick.current = true
+    el.scrollTop = el.scrollHeight
+    const frame = requestAnimationFrame(() => {
+      if (stick.current) el.scrollTop = el.scrollHeight
+    })
+    return () => cancelAnimationFrame(frame)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -268,7 +290,9 @@ export function MessageList({ messages: all, conversationId, empty, focus, threa
       ref={ref}
       onScroll={(e) => {
         const el = e.currentTarget
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+        const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+        stick.current = fromBottom < 60
+        setFarFromBottom(fromBottom > el.clientHeight / 2)
       }}
     >
       {lead}
@@ -284,15 +308,106 @@ export function MessageList({ messages: all, conversationId, empty, focus, threa
           m.author.kind !== 'routine'
         return <MessageRow key={m.id} message={m} grouped={grouped} replies={replies && (replies.get(m.id) ?? NO_REPLIES)} />
       })}
+      {farFromBottom && (
+        <div className="messages__jump">
+          <button className="messages__jump-btn" title={L('Ir para o fim', 'Go to the end')} aria-label={L('Ir para o fim da conversa', 'Go to the end of the conversation')} onClick={() => ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: 'smooth' })}>
+            <Icon name="down" size={15} />
+          </button>
+        </div>
+      )}
     </div>
   )
 }
 
-const AGENT_PLUGINS = [remarkGfm, remarkLocalPaths]
-const keepLocalLinks = (url: string): string => (url.startsWith(LOCAL_LINK) ? url : defaultUrlTransform(url))
+const AGENT_PLUGINS = [remarkGfm, remarkMentions, remarkLocalPaths]
+const PLAIN_PLUGINS = [remarkGfm, remarkMentions]
+
+// My messages sent while the agent was still on my last one, over the field: they aren't in the
+// conversation yet, since the agent hasn't read them. They go in, in this order, when it's done and
+// takes them all in one reply. Until then each can be changed, taken back, or sent at once ("Orientar":
+// the agent stops and starts again with it in hand).
+function QueuePanel({ items }: { items: Message[] }): ReactNode {
+  const agent = useStore((s) => (items[0]?.queued ? agentById(s, items[0].queued) : undefined))
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
+  const [steering, setSteering] = useState<string | null>(null)
+  const who = agent?.name ?? L('O agente', 'The agent')
+  // The router is still picking: no one to steer yet.
+  const picking = items.every((m) => m.queued === ROUTING)
+  const save = (): void => {
+    if (editing?.text.trim()) editQueued(editing.id, editing.text)
+    setEditing(null)
+  }
+  return (
+    <section className="queue" aria-label={L('Fila de mensagens', 'Message queue')}>
+      <div className="queue__head">
+        <Icon name="clock" size={13} />
+        <strong>{L('Fila de mensagens', 'Message queue')}</strong>
+        <span className="muted">
+          {picking
+            ? L('Aguardando · escolhendo quem responde', 'Waiting · picking who answers')
+            : L(`Aguardando · ${who} está respondendo e lê na sequência`, `Waiting · ${who} is replying and reads these next`)}
+        </span>
+      </div>
+      <ol className="queue__list">
+        {items.map((m, i) => (
+          <li key={m.id} className={`queue__item ${editing?.id === m.id ? 'is-editing' : ''}`} aria-label={L(`Mensagem na fila ${i + 1}: ${m.text}`, `Queued message ${i + 1}: ${m.text}`)}>
+            <span className="queue__n">{i + 1}</span>
+            {editing?.id === m.id ? (
+              <textarea
+                className="queue__edit"
+                value={editing.text}
+                autoFocus
+                rows={Math.min(5, editing.text.split('\n').length + 1)}
+                onChange={(e) => setEditing({ id: m.id, text: e.target.value })}
+                onBlur={save}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    save()
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault()
+                    setEditing(null)
+                  }
+                }}
+              />
+            ) : (
+              <span className="queue__text">{m.text || L('(imagem)', '(image)')}</span>
+            )}
+            <span className="queue__actions">
+              {m.queued !== ROUTING && (
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  disabled={steering === m.id}
+                  title={L(`${who} para o que está fazendo e recomeça já com esta mensagem`, `${who} stops what it's doing and starts again with this message`)}
+                  onClick={() => {
+                    setSteering(m.id)
+                    steer(m.id)
+                  }}
+                >
+                  {steering === m.id ? L('Orientando…', 'Steering…') : L('Orientar', 'Steer')}
+                </button>
+              )}
+              <button type="button" className="icon-btn" title={L('Editar mensagem', 'Edit message')} aria-label={L(`Editar mensagem na fila ${i + 1}`, `Edit queued message ${i + 1}`)} onClick={() => setEditing({ id: m.id, text: m.text })}>
+                <Icon name="edit" size={14} />
+              </button>
+              <button type="button" className="icon-btn" title={L('Excluir mensagem', 'Delete message')} aria-label={L(`Excluir mensagem na fila ${i + 1}`, `Delete queued message ${i + 1}`)} onClick={() => cancelQueued(m.id)}>
+                <Icon name="trash" size={14} />
+              </button>
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
+// Parsing is by far the most expensive part of drawing a message, so it only runs when the text changes.
+const MessageMarkdown = memo(Markdown)
 
 // `replies`: in a timeline with threads, the replies to this message (none yet: empty).
-function MessageRow({ message, grouped, replies }: { message: Message; grouped: boolean; replies?: Message[] }): ReactNode {
+// Memoized because each word an agent streams redraws the list: only the row that changed should pay for it.
+const MessageRow = memo(function MessageRow({ message, grouped, replies }: { message: Message; grouped: boolean; replies?: Message[] }): ReactNode {
   const me = useStore((s) => s.me)
   // In the timeline (not as the thread's own heading), lit while its thread is open on the side.
   const threadOpen = useStore((s) => !!replies && s.panel?.kind === 'thread' && s.panel.id === message.id)
@@ -308,7 +423,7 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
   )
 
   // The same object between renders, or every link would start over.
-  const agentMarkdown = useMemo(() => ({ pre: CodeBlock, a: localLinkFor(message.id) }), [message.id])
+  const agentMarkdown = useMemo(() => ({ pre: CodeBlock, a: localLinkFor(message.id), span: MentionSpan }), [message.id])
 
   if (message.author.kind === 'system') {
     return (
@@ -350,9 +465,9 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
         {message.text ? (
           <div className="md">
             {agent && message.run?.status !== 'working' ? (
-              <Markdown remarkPlugins={AGENT_PLUGINS} urlTransform={keepLocalLinks} components={agentMarkdown}>{highlightMentions(message.text)}</Markdown>
+              <MessageMarkdown urlTransform={safeUrl} remarkPlugins={AGENT_PLUGINS} components={agentMarkdown}>{wikiLinks(message.text)}</MessageMarkdown>
             ) : (
-              <Markdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock, a: (p) => <WikiLink href={p.href}>{p.children}</WikiLink> }}>{highlightMentions(message.text)}</Markdown>
+              <MessageMarkdown urlTransform={safeUrl} remarkPlugins={PLAIN_PLUGINS} components={plainMarkdown}>{wikiLinks(message.text)}</MessageMarkdown>
             )}
           </div>
         ) : null}
@@ -366,6 +481,7 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
         {message.run?.question && <QuestionCard question={message.run.question} answered={message.run.status !== 'waiting_input'} />}
         {approval && <ApprovalCard approval={approval} />}
         {message.run?.agentDraft && <AgentProposal message={message} />}
+        {message.run?.proposal && <ProposalCard message={message} />}
         {message.run?.memoryIds?.map((mid) => <MemoryChip key={mid} id={mid} />)}
         {message.run?.routineIds?.map((rid) => <RoutineChip key={rid} id={rid} />)}
         {message.run?.wikiChanges?.map((cid) => <WikiChip key={cid} id={cid} />)}
@@ -378,7 +494,12 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
         )}
         {agent && message.run?.services?.map((name) => <ServiceCard key={name} agentId={agent.id} name={name} />)}
         {agent && message.run?.browser && <BrowserCard agentId={agent.id} big={liveBrowser} />}
-        {message.run?.status === 'stopped' && <div className="note">{L('Interrompido por você.', 'Stopped by you.')}</div>}
+        {message.run?.status === 'stopped' &&
+          (message.run.steered ? (
+            <div className="note">{L('Parei aqui para seguir a sua orientação: continuo logo abaixo.', 'I stopped here to follow your steer: I carry on right below.')}</div>
+          ) : (
+            <div className="note">{L('Interrompido por você.', 'Stopped by you.')}</div>
+          ))}
         {message.run?.status === 'interrupted' && <div className="note">{L('Interrompido: o app fechou no meio da resposta.', 'Interrupted: the app closed in the middle of the reply.')}</div>}
         {message.run?.error && <div className="note note--error">{message.run.error}</div>}
         {message.run?.errorDetail && (
@@ -397,7 +518,7 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
           </>
         )}
         {/* At the limit, trying again only helps once the limit went up: until then, the way out is raising it. */}
-        {message.run && (['failed', 'stopped', 'interrupted'].includes(message.run.status) || (message.run.status === 'limit_reached' && (!agent || agent.used < agent.limit))) && (
+        {message.run && !message.run.steered && (['failed', 'stopped', 'interrupted'].includes(message.run.status) || (message.run.status === 'limit_reached' && (!agent || agent.used < agent.limit))) && (
           <button className="btn btn--xs retry" onClick={() => retryRun(message.id)}>
             {L('Tentar de novo', 'Try again')}
           </button>
@@ -417,7 +538,7 @@ function MessageRow({ message, grouped, replies }: { message: Message; grouped: 
       </div>
     </article>
   )
-}
+})
 
 // What a routine asked, posted at its time; the agent's reply comes next.
 function RoutineMessage({ message, replies }: { message: Message; replies?: Message[] }): ReactNode {
@@ -449,7 +570,7 @@ function RoutineMessage({ message, replies }: { message: Message; replies?: Mess
           </div>
         )}
         <div className="md">
-          <Markdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock, a: (p) => <WikiLink href={p.href}>{p.children}</WikiLink> }}>{highlightMentions(message.text)}</Markdown>
+          <MessageMarkdown urlTransform={safeUrl} remarkPlugins={PLAIN_PLUGINS} components={plainMarkdown}>{wikiLinks(message.text)}</MessageMarkdown>
         </div>
         {replies && <ThreadLink message={message} replies={replies} />}
       </div>
@@ -463,7 +584,7 @@ function SystemText({ text }: { text: string }): ReactNode {
   const [head = '', ...why] = text.split(' · ')
   return (
     <>
-      <Markdown>{head}</Markdown>
+      <Markdown urlTransform={safeUrl}>{head}</Markdown>
       {why.length > 0 && (
         <span className="system-line__why" title={why.join(' · ').replace(/\*\*/g, '')}>
           {why.join(' · ').replace(/\*\*/g, '')}
@@ -561,8 +682,9 @@ function ThreadLink({ message, replies }: { message: Message; replies: Message[]
 // field that answers there.
 function ThreadPanel({ rootId, conv, title, members }: { rootId: string; conv: Conversation; title: string; members: Agent[] }): ReactNode {
   const root = useStore((s) => s.messages.find((m) => m.id === rootId))
-  const replies = useStore((s) => s.messages.filter((m) => m.threadId === rootId))
+  const replies = useStore((s) => s.messages.filter((m) => m.threadId === rootId && !m.queued))
   const agents = useStore((s) => s.agents)
+  const [showSummary, setShowSummary] = useState(false)
   const said = replies.filter((m) => m.author.kind !== 'system' && m.run?.status !== 'working').length
   const replying = [...new Set(replies.flatMap((m) => (m.run?.status === 'working' && m.author.kind === 'agent' ? [m.author.id] : [])))].map((id) => agents.find((a) => a.id === id)?.name ?? L('agente', 'agent'))
   // Open, the thread is seen as it goes; closed, up to when it closed.
@@ -601,12 +723,24 @@ function ThreadPanel({ rootId, conv, title, members }: { rootId: string; conv: C
         <strong className="side-panel__title">{L('Thread', 'Thread')}</strong>
         <span className="side-panel__where">{L(`em ${title}`, `in ${title}`)}</span>
         <span className="grow" />
+        {root && (
+          <button
+            className={`icon-btn ${showSummary ? 'is-active' : ''}`}
+            title={L('O que esta thread já cobriu', 'What this thread has covered')}
+            aria-label={L('Resumo da thread', 'Thread summary')}
+            aria-pressed={showSummary}
+            onClick={() => setShowSummary(!showSummary)}
+          >
+            <Icon name="book" size={14} />
+          </button>
+        )}
         <button className="icon-btn" title={L('Fechar', 'Close')} aria-label={L('Fechar a thread', 'Close the thread')} onClick={() => openPanel(null)}>
           <Icon name="x" size={14} />
         </button>
       </header>
       {root?.conversationId === conv.id ? (
         <>
+          {showSummary && <ThreadSummaryPanel root={root} replies={replies} onClose={() => setShowSummary(false)} />}
           <MessageList key={rootId} messages={replies} conversationId={conv.id} lead={lead} />
           <Composer conversationId={conv.id} threadId={rootId} members={members} placeholder={L('Responder na thread…', 'Reply in thread…')} />
         </>
@@ -639,52 +773,99 @@ function CodeBlock({ children }: { children?: ReactNode }): ReactNode {
 }
 
 function SummaryPanel({ conv, messages, onClose }: { conv: Conversation; messages: Message[]; onClose: () => void }): ReactNode {
-  const [text, setText] = useState(conv.summary ?? '')
+  const since = messages.filter((m) => m.author.kind !== 'system' && m.text.trim() && m.at > (conv.summaryUntil ?? 0)).length
+  return (
+    <SummaryBox
+      title={L('Resumo da conversa', 'Conversation summary')}
+      summary={conv.summary}
+      at={conv.summaryAt}
+      ready={since > SUMMARY_WINDOW}
+      notYet={L(`As últimas ${SUMMARY_WINDOW} mensagens sempre vão inteiras; ainda não há o que resumir.`, `The last ${SUMMARY_WINDOW} messages always go in full; nothing to summarize yet.`)}
+      empty={L(`Quando passar de ${SUMMARY_MAX_AFTER} mensagens, o que sair da janela vira um resumo aqui.`, `Past ${SUMMARY_MAX_AFTER} messages, what leaves the window becomes a summary here.`)}
+      hint={L(
+        `Numa thread, os agentes leem só a thread. Este resumo vai pras respostas fora de threads, como as das rotinas: elas recebem ${conv.summary ? 'este resumo e ' : ''}as ${since} mensagens ${conv.summary ? 'desde ele' : 'da conversa'}.`,
+        `In a thread, agents read only the thread. This summary goes to replies outside threads, like routines': they get ${conv.summary ? 'this summary and ' : ''}the ${since} messages ${conv.summary ? 'since it' : 'of the conversation'}.`
+      )}
+      onSummarize={() => summarizeNow(conv.id)}
+      onSave={(text) => editSummary(conv.id, text)}
+      onClose={onClose}
+    />
+  )
+}
+
+// A thread's own summary: made once it's quiet for a while (or grows long), and where the
+// memories about me in it come from.
+function ThreadSummaryPanel({ root, replies, onClose }: { root: Message; replies: Message[]; onClose: () => void }): ReactNode {
+  const s = root.threadSummary
+  const since = [root, ...replies].filter((m) => m.author.kind !== 'system' && m.text.trim() && m.at > (s?.until ?? 0)).length
+  return (
+    <SummaryBox
+      title={L('Resumo da thread', 'Thread summary')}
+      summary={s?.text}
+      at={s?.at}
+      ready={since > 0}
+      notYet={L('Nada novo desde o resumo.', 'Nothing new since the summary.')}
+      empty={L('Quando a thread ficar parada por alguns minutos, o que foi dito vira um resumo aqui, e as memórias sobre você saem dele.', 'Once the thread is quiet for a few minutes, what was said becomes a summary here, and the memories about you come from it.')}
+      hint={L(
+        `Os agentes de outras threads acham esta por ele, quando procuram. Aqui, eles recebem a thread inteira até ${SUMMARY_MAX_AFTER} respostas; passando disso, este resumo e as mais recentes.`,
+        `Agents in other threads find this one by it when they search. Here, they get the whole thread up to ${SUMMARY_MAX_AFTER} replies; past that, this summary and the newest ones.`
+      )}
+      onSummarize={() => summarizeThreadNow(root.id)}
+      onSave={(text) => editThreadSummary(root.id, text)}
+      onClose={onClose}
+    />
+  )
+}
+
+function SummaryBox(p: {
+  title: string
+  summary?: string
+  at?: number
+  ready: boolean // there's something new to summarize
+  notYet: string // why not, when there isn't
+  empty: string
+  hint: string
+  onSummarize: () => void
+  onSave: (text: string) => void
+  onClose: () => void
+}): ReactNode {
+  const [text, setText] = useState(p.summary ?? '')
   const [asked, setAsked] = useState<number | null>(null)
-  useEffect(() => setText(conv.summary ?? ''), [conv.summary, conv.summaryAt])
+  useEffect(() => setText(p.summary ?? ''), [p.summary, p.at])
   useEffect(() => {
     if (asked === null) return
     const t = setTimeout(() => setAsked(null), 120_000) // give up waiting; the core logs failures
     return () => clearTimeout(t)
   }, [asked])
-  const busy = asked !== null && (conv.summaryAt ?? 0) < asked
-  const since = messages.filter((m) => m.author.kind !== 'system' && m.text.trim() && m.at > (conv.summaryUntil ?? 0)).length
-  const changed = text.trim() !== (conv.summary ?? '').trim()
+  const busy = asked !== null && (p.at ?? 0) < asked
+  const changed = text.trim() !== (p.summary ?? '').trim()
 
   return (
     <div className="summary">
       <div className="summary__head">
-        <strong>{L('Resumo da conversa', 'Conversation summary')}</strong>
-        <span className="muted small">{conv.summaryAt ? L(`atualizado ${time(conv.summaryAt)}`, `updated ${time(conv.summaryAt)}`) : L('ainda não há', 'none yet')}</span>
+        <strong>{p.title}</strong>
+        <span className="muted small">{p.at ? L(`atualizado ${time(p.at)}`, `updated ${time(p.at)}`) : L('ainda não há', 'none yet')}</span>
         <span className="grow" />
         <button
           className="btn btn--sm"
-          disabled={busy || since <= SUMMARY_WINDOW}
-          title={since <= SUMMARY_WINDOW ? L(`As últimas ${SUMMARY_WINDOW} mensagens sempre vão inteiras; ainda não há o que resumir.`, `The last ${SUMMARY_WINDOW} messages always go in full; nothing to summarize yet.`) : undefined}
+          disabled={busy || !p.ready}
+          title={p.ready ? undefined : p.notYet}
           onClick={() => {
             setAsked(Date.now())
-            summarizeNow(conv.id)
+            p.onSummarize()
           }}
         >
           {busy ? L('Resumindo…', 'Summarizing…') : L('Resumir agora', 'Summarize now')}
         </button>
-        <button className="icon-btn" title={L('Fechar', 'Close')} onClick={onClose}>
+        <button className="icon-btn" title={L('Fechar', 'Close')} onClick={p.onClose}>
           <Icon name="x" size={14} />
         </button>
       </div>
-      {conv.summary !== undefined || changed ? (
-        <textarea rows={6} value={text} onChange={(e) => setText(e.target.value)} />
-      ) : (
-        <p className="muted small">
-          {L(`Quando passar de ${SUMMARY_MAX_AFTER} mensagens, o que sair da janela vira um resumo aqui, e os agentes recebem o resumo mais as mensagens recentes.`, `Past ${SUMMARY_MAX_AFTER} messages, what leaves the window becomes a summary here, and agents get the summary plus the recent messages.`)}
-        </p>
-      )}
+      {p.summary !== undefined || changed ? <textarea rows={6} value={text} onChange={(e) => setText(e.target.value)} /> : <p className="muted small">{p.empty}</p>}
       <div className="row row--between">
-        <span className="hint">
-          {L(`Os agentes recebem ${conv.summary ? 'este resumo e ' : ''}as ${since} mensagens ${conv.summary ? 'desde ele' : 'da conversa'}.`, `Agents get ${conv.summary ? 'this summary and ' : ''}the ${since} messages ${conv.summary ? 'since it' : 'of the conversation'}.`)}
-        </span>
+        <span className="hint">{p.hint}</span>
         {changed && (
-          <button className="btn btn--sm btn--primary" onClick={() => editSummary(conv.id, text)}>
+          <button className="btn btn--sm btn--primary" onClick={() => p.onSave(text)}>
             {L('Salvar resumo', 'Save summary')}
           </button>
         )}
@@ -756,18 +937,24 @@ function QuestionCard({ question, answered }: { question: string; answered: bool
   )
 }
 
-// A @handle in code is not bolded (CODE_SPANS, the core's rule too): the box shows and copies the real text.
-const boldMentions = (t: string): string => t.replace(/(^|\s)@([a-z0-9_-]{2,32})/gi, '$1**@$2**')
-const highlightMentions = (text: string): string => {
-  text = wikiLinks(text)
-  let out = ''
-  let last = 0
-  for (const m of text.matchAll(CODE_SPANS)) {
-    out += boldMentions(text.slice(last, m.index)) + m[0]
-    last = m.index! + m[0].length
-  }
-  return out + boldMentions(text.slice(last))
+// What remarkMentions marked: an agent's @handle becomes its chip, which opens its profile. A handle
+// no agent has stays as it was written, in bold, as any @ always was.
+function MentionSpan({ node: _, ...props }: ComponentProps<'span'> & ExtraProps): ReactNode {
+  const handle = (props as Record<string, unknown>)['data-mention']
+  if (typeof handle !== 'string') return <span {...props} />
+  return <Mention handle={handle} />
 }
+function Mention({ handle }: { handle: string }): ReactNode {
+  const agent = useStore((s) => s.agents.find((a) => a.handle.toLowerCase() === handle.toLowerCase()))
+  if (!agent) return <strong>@{handle}</strong>
+  return (
+    <button className={`mention c-${agent.color}`} style={ownColor(agent)} title={agent.role ? `${agent.name} · ${agent.role}` : agent.name} onClick={() => navigate({ kind: 'agent', id: agent.id })}>
+      <AgentAvatar agent={agent} size={16} />
+      <span>@{agent.handle}</span>
+    </button>
+  )
+}
+const plainMarkdown = { pre: CodeBlock, a: (p: { href?: string; children?: ReactNode }) => <WikiLink href={p.href}>{p.children}</WikiLink>, span: MentionSpan }
 
 // Now, every second while `on`: the clock of a reply at work.
 function useNow(on: boolean): number {
@@ -784,8 +971,10 @@ function useNow(on: boolean): number {
 // steps it took. The steps themselves open on a click.
 function RunSteps({ message }: { message: Message }): ReactNode {
   const run = message.run!
-  const [open, setOpen] = useState(false)
+  // Open while the agent works, so its steps read as they go, unless the person closes it; closed after.
+  const [toggled, setOpen] = useState<boolean | null>(null)
   const working = run.status === 'working'
+  const open = toggled ?? working
   const now = useNow(working)
   // Just finished: the pulse turns into a green check for a moment, then the chevron is back.
   const justDone = useJustEnded(working, 1600) && run.status === 'done'
@@ -853,14 +1042,29 @@ function RunSteps({ message }: { message: Message }): ReactNode {
 }
 
 function StepRow({ step }: { step: Step }): ReactNode {
+  const [whole, setWhole] = useState(false)
+  const [allInput, setAllInput] = useState(false)
   return (
-    <li className={`step step--${step.status}`}>
+    <li className={`step step--${step.status}${step.error || step.input || step.output ? ' step--why' : ''}`}>
       <span className="step__icon">
         {step.status === 'running' ? <span className="spinner" /> : <Icon name={step.status === 'done' ? 'check' : 'x'} size={12} />}
       </span>
       <span className="step__label">{step.label}</span>
       {step.note ? <span className="step__note">{step.note}</span> : step.detail && <code className="step__detail">{step.detail}</code>}
       {step.ms !== undefined && <span className="step__ms">{duration(step.ms)}</span>}
+      {step.input && (
+        // What it asked (the SQL, the path): two lines, the whole of it on a click.
+        <code className={`step__input${allInput ? ' is-whole' : ''}`} title={allInput ? undefined : L('Ver tudo', 'See all')} onClick={() => setAllInput(!allInput)}>
+          <span className="step__clamp">{step.input}</span>
+        </code>
+      )}
+      {step.output && <span className="step__output">→ {step.output}</span>}
+      {step.error && (
+        // Why it failed, in the tool's words: a few lines, the whole of it on a click.
+        <span className={`step__error${whole ? ' is-whole' : ''}`} title={whole ? undefined : L('Ver tudo', 'See all')} onClick={() => setWhole(!whole)}>
+          {step.error}
+        </span>
+      )}
     </li>
   )
 }
@@ -1100,6 +1304,22 @@ async function prepareImage(file: File): Promise<Attached | string> {
 // One draft per conversation (and per thread), kept while the app runs: leaving a
 // channel doesn't lose the message you were typing.
 const drafts = new Map<string, { text: string; images: Attached[] }>()
+// On a server the page reloads to reconnect (src/server's bridge): the texts are kept in this
+// tab for that moment, and come back once. Images aren't: attach them again.
+const RELOAD_KEY = 'tucano-drafts'
+try {
+  const kept = JSON.parse(sessionStorage.getItem(RELOAD_KEY) ?? '{}') as Record<string, string>
+  for (const [k, text] of Object.entries(kept)) if (typeof text === 'string' && text.trim()) drafts.set(k, { text, images: [] })
+  sessionStorage.removeItem(RELOAD_KEY)
+} catch {}
+const keepForReload = (current?: { key: string; text: string }): void => {
+  const texts: Record<string, string> = {}
+  for (const [k, d] of drafts) if (d.text.trim()) texts[k] = d.text
+  if (current?.text.trim()) texts[current.key] = current.text
+  try {
+    sessionStorage.setItem(RELOAD_KEY, JSON.stringify(texts))
+  } catch {}
+}
 
 type DictationState = 'idle' | 'starting' | 'recording' | 'transcribing'
 type DictationControls = { press: () => void; release: () => void; stop: () => void; cancel: () => void; startedAt: () => number }
@@ -1333,6 +1553,8 @@ function RecordingClock({ since }: { since: number }): ReactNode {
   )
 }
 
+const TYPE = ['font-family', 'font-size', 'font-weight', 'line-height', 'letter-spacing', 'word-spacing', 'tab-size', 'text-transform', 'text-indent', 'padding']
+
 // `threadId`: it answers in the thread that message started, not in the conversation.
 export function Composer({ conversationId, threadId, members, placeholder }: { conversationId: string; threadId?: string; members: Agent[]; placeholder: string }): ReactNode {
   const key = threadId ?? conversationId // the draft's
@@ -1346,12 +1568,15 @@ export function Composer({ conversationId, threadId, members, placeholder }: { c
   const [mention, setMention] = useState<{ query: string; start: number } | null>(null)
   const [active, setActive] = useState(0)
   const ref = useRef<HTMLTextAreaElement>(null)
+  const mirror = useRef<HTMLDivElement>(null)
   const platform = useStore((s) => s.platform)
+  const agents = useStore((s) => s.agents)
   const allAgents = useStore((s) => s.agents.filter(isTeam))
   const isDm = useStore((s) => s.conversations.find((c) => c.id === conversationId)?.kind === 'dm')
   // Replies at work and questions asked here: in this thread, or outside threads.
   const here = (m: Message): boolean => m.conversationId === conversationId && m.threadId === threadId
   const working = useStore((s) => s.messages.filter((m) => here(m) && m.author.kind === 'agent' && m.run?.status === 'working'))
+  const queue = useStore((s) => s.messages.filter((m) => here(m) && !!m.queued))
   const asker = useStore((s) => {
     const q = s.messages.findLast((m) => here(m) && m.run?.status === 'waiting_input')
     return q?.author.kind === 'agent' ? agentById(s, q.author.id)?.name : undefined
@@ -1361,6 +1586,11 @@ export function Composer({ conversationId, threadId, members, placeholder }: { c
   // back keeps it (like a draft). In memory: closing the app drops the drafts.
   const live = useRef({ text, images })
   live.current = { text, images }
+  useEffect(() => {
+    const save = (): void => keepForReload({ key, text: live.current.text })
+    window.addEventListener('tucano:reloading', save)
+    return () => window.removeEventListener('tucano:reloading', save)
+  }, [key])
   useEffect(() => {
     const draft = drafts.get(key)
     setText(draft?.text ?? '')
@@ -1374,7 +1604,22 @@ export function Composer({ conversationId, threadId, members, placeholder }: { c
     }
   }, [key])
 
-  const addFiles = async (files: File[]): Promise<void> => {
+  const addFiles = async (all: File[]): Promise<void> => {
+    if (!all.length) return
+    // On a server, a file that isn't an image goes up to it (~/Enviados) and the message says where:
+    // an agent on that computer opens it there, and the link brings it back down.
+    const upload = window.tucano.upload
+    const files = upload ? all.filter((f) => IMAGE_MIMES.includes(f.type)) : all
+    const others = upload ? all.filter((f) => !IMAGE_MIMES.includes(f.type)) : []
+    if (others.length && upload) {
+      setNote(L(`Enviando ${others.length === 1 ? others[0]!.name : `${others.length} arquivos`}…`, `Sending ${others.length === 1 ? others[0]!.name : `${others.length} files`}…`))
+      const sent = await Promise.allSettled(others.map((f) => upload(f, 'message')))
+      const paths = sent.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []))
+      if (paths.length) setText((t) => `${t.trim() ? `${t.trimEnd()}\n` : ''}${paths.map((p) => L(`Arquivo enviado: \`${p}\``, `File sent: \`${p}\``)).join('\n')}`)
+      const failed = sent.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+      setNote(failed ? String(failed.reason instanceof Error ? failed.reason.message : failed.reason) : '')
+      if (!files.length) return void ref.current?.focus()
+    }
     if (!files.length) return
     const done = await Promise.all(files.map(prepareImage))
     const ok = done.filter((d): d is Attached => typeof d !== 'string')
@@ -1425,12 +1670,52 @@ export function Composer({ conversationId, threadId, members, placeholder }: { c
     }
   }, [inThread])
 
-  useLayoutEffect(() => {
+  // The field grows with its text, up to a point; on a narrower window the same text takes more lines.
+  const fit = (): void => {
     const el = ref.current
     if (!el) return
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`
-  }, [text])
+    followField()
+  }
+  useLayoutEffect(fit, [text])
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    let width = el.clientWidth
+    const watch = new ResizeObserver(() => {
+      if (el.clientWidth === width) return // only a new width changes the lines; fit's own height doesn't
+      width = el.clientWidth
+      fit()
+    })
+    watch.observe(el)
+    return () => watch.disconnect()
+  }, [])
+
+  // The text shows from a copy behind the field, where an agent's @handle wears its color; the field
+  // on top keeps the caret and the selection. The copy takes the field's type as computed (a phone
+  // gets 16 px, and a field doesn't inherit letter spacing), its width (a scrollbar takes some) and
+  // its size and its scroll, so both break the lines in the same places and scroll as far.
+  const followField = (): void => {
+    const el = ref.current
+    const m = mirror.current
+    if (!el || !m) return
+    const field = getComputedStyle(el)
+    for (const p of TYPE) m.style.setProperty(p, field.getPropertyValue(p))
+    m.style.width = `${el.clientWidth}px`
+    m.style.height = `${el.clientHeight}px`
+    m.scrollTop = el.scrollTop
+  }
+  const painted = splitMentions(text).map((p, i) => {
+    const a = 'handle' in p ? agents.find((x) => x.handle.toLowerCase() === p.handle.toLowerCase()) : undefined
+    return a ? (
+      <mark key={i} className={`c-${a.color}`} style={ownColor(a)}>
+        {p.text}
+      </mark>
+    ) : (
+      p.text
+    )
+  })
 
   const options = mention
     ? members.filter((a) => a.handle.startsWith(mention.query.toLowerCase()) || a.name.toLowerCase().startsWith(mention.query.toLowerCase()))
@@ -1489,6 +1774,7 @@ export function Composer({ conversationId, threadId, members, placeholder }: { c
 
   return (
     <div className="composer-wrap">
+      {queue.length > 0 && <QueuePanel items={queue} />}
       {dragging && !inThread && (
         <div className="drop-overlay">
           <div className="drop-overlay__card">
@@ -1538,49 +1824,57 @@ export function Composer({ conversationId, threadId, members, placeholder }: { c
             ))}
           </div>
         )}
-        <textarea
-          ref={ref}
-          rows={1}
-          value={text}
-          placeholder={asker ? L(`Responder a ${asker}`, `Reply to ${asker}`) : placeholder}
-          onChange={(e) => {
-            setText(e.target.value)
-            updateMention(e.target.value, e.target.selectionStart)
-          }}
-          onPaste={(e) => {
-            const files = [...e.clipboardData.files].filter((f) => f.type.startsWith('image/'))
-            if (!files.length) return
-            e.preventDefault()
-            void addFiles(files)
-          }}
-          onKeyDown={(e) => {
-            if (e.code === 'Space' && (platform === 'mac' ? e.altKey : e.ctrlKey) && canRecord()) {
+        <div className="composer__field">
+          <div ref={mirror} className="composer__mirror" aria-hidden>
+            {painted}
+            {'\n'}
+          </div>
+          <textarea
+            ref={ref}
+            rows={1}
+            onScroll={followField}
+            value={text}
+            placeholder={asker ? L(`Responder a ${asker}`, `Reply to ${asker}`) : placeholder}
+            onChange={(e) => {
+              setText(e.target.value)
+              updateMention(e.target.value, e.target.selectionStart)
+              if (e.target.value.trim()) typing(conversationId, threadId)
+            }}
+            onPaste={(e) => {
+              const files = [...e.clipboardData.files].filter((f) => window.tucano.upload || f.type.startsWith('image/'))
+              if (!files.length) return
               e.preventDefault()
-              if (!e.repeat) voiceControls.press()
-              return
-            }
-            if (e.key === 'Escape' && voice !== 'idle') return voiceControls.cancel()
-            if (mention && options.length > 0) {
-              if (e.key === 'ArrowDown') return (e.preventDefault(), setActive((active + 1) % options.length))
-              if (e.key === 'ArrowUp') return (e.preventDefault(), setActive((active - 1 + options.length) % options.length))
-              if (e.key === 'Enter' || e.key === 'Tab') return (e.preventDefault(), pick(options[active]!))
-              if (e.key === 'Escape') return setMention(null)
-            }
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault()
-              submit()
-            }
-          }}
-        />
+              void addFiles(files)
+            }}
+            onKeyDown={(e) => {
+              if (e.code === 'Space' && (platform === 'mac' ? e.altKey : e.ctrlKey) && canRecord()) {
+                e.preventDefault()
+                if (!e.repeat) voiceControls.press()
+                return
+              }
+              if (e.key === 'Escape' && voice !== 'idle') return voiceControls.cancel()
+              if (mention && options.length > 0) {
+                if (e.key === 'ArrowDown') return (e.preventDefault(), setActive((active + 1) % options.length))
+                if (e.key === 'ArrowUp') return (e.preventDefault(), setActive((active - 1 + options.length) % options.length))
+                if (e.key === 'Enter' || e.key === 'Tab') return (e.preventDefault(), pick(options[active]!))
+                if (e.key === 'Escape') return setMention(null)
+              }
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                submit()
+              }
+            }}
+          />
+        </div>
         <div className="composer__bar">
           <VoiceButton controls={voiceControls} state={voice} />
-          <button className="icon-btn" title={L('Anexar imagem (ou arraste e solte, ou cole)', 'Attach an image (or drag and drop, or paste)')} onClick={() => picker.current?.click()}>
+          <button className="icon-btn" title={window.tucano.upload ? L('Anexar arquivo (ou arraste e solte, ou cole)', 'Attach a file (or drag and drop, or paste)') : L('Anexar imagem (ou arraste e solte, ou cole)', 'Attach an image (or drag and drop, or paste)')} onClick={() => picker.current?.click()}>
             <Icon name="image" size={15} />
           </button>
           <input
             ref={picker}
             type="file"
-            accept="image/*"
+            accept={window.tucano.upload ? undefined : 'image/*'}
             multiple
             hidden
             onChange={(e) => {
