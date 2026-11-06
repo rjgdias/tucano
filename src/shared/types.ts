@@ -1,12 +1,13 @@
 // Domain types shared by the core (utility process) and the renderer.
 import type { AvatarDefinition } from 'open-bot-avatar'
+import type { ActionRules } from './actions'
 import type { ChannelLayout } from './channel-layout'
 import { L, lang, type Lang } from './lang'
 
 export type AgentColor = 'sky' | 'indigo' | 'violet' | 'rose' | 'amber' | 'green' | 'teal' | 'graphite'
 export type GrantLevel = 'none' | 'read' | 'read_write'
 export type ToolClass = 'read' | 'write' | 'sensitive'
-export type EngineId = 'claude' | 'codex' | 'opencode' | 'pi' | 'gemini' | 'cursor'
+export type EngineId = 'claude' | 'codex' | 'opencode' | 'pi' | 'gemini' | 'cursor' | 'grok'
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh'
 export type MemoryMode = 'auto' | 'approve' | 'read' // how an agent's `lembrar` calls land
 
@@ -83,6 +84,7 @@ export interface Agent {
   browser?: boolean // drives a browser of its own: opens, clicks, types (spec §24); off unless true
   apps?: AgentApp[] // the person's own apps it may use (Notes, Mail…), each to read or to read and change
   autoApprove?: string[] // "connectorId:tool" sensitive tools approved for good ("sempre permitir"), never high-risk ones
+  actionRules?: ActionRules // what it does about a commit, a push, a PR…: over settings.actionRules, kind by kind; unset kinds follow them
   folders?: LentFolder[] // Mac folders lent to that computer (spec §13, M5.1); changed only through lendFolder/folderAction
   archived: boolean
   kind?: 'tuca' // the agent that builds the others: it proposes, the person creates
@@ -118,6 +120,7 @@ export interface Conversation {
   summaryAt?: number
   unread?: number
   wikiCapture?: boolean // false: the wiki's curator leaves this conversation out
+  threads?: boolean // true: each message's answers go in its thread; unset: in the conversation, like a chat
 }
 
 // "Lançamento do App" → "lancamento-do-app": lowercase, no accents, hyphens.
@@ -137,6 +140,9 @@ export interface Step {
   label: string
   detail?: string
   note?: string // what the agent said while working, before this step's tool call
+  error?: string // why it failed, in the tool's own words
+  input?: string // what the call asked, the argument that says it (the SQL, the path), as it was sent
+  output?: string // what came back, in a few words ("120 rows")
   status: StepStatus
   ms?: number
 }
@@ -171,6 +177,7 @@ export interface Run {
   task?: string // what this reply was asked beyond the conversation; kept only while it can be tried again or go on
   work?: string // the piece of work it counts toward, e.g. the issue "OAB-65" (spec §20)
   agentDraft?: AgentDraft // an agent the Tuca proposed with propor_agente, shown as a card
+  proposal?: Proposal // what an agent proposed (a change to an agent, a routine, a channel, a team), shown as a card
 }
 
 // An agent the Tuca proposes. Nothing exists until the person creates it.
@@ -190,6 +197,19 @@ export interface AgentDraft {
   agentId?: string // once created
 }
 
+// What the Tuca may propose to change in an agent that exists.
+export type AgentChanges = Partial<Pick<Agent, 'name' | 'role' | 'instructions' | 'modelId' | 'effort' | 'web' | 'grants' | 'limit'>>
+
+// A change an agent proposes to what exists, or a new routine, channel or team: a card under its message
+// with Aplicar and Descartar. Nothing changes until the person applies it. `appliedId`: the agent,
+// routine or channel it made or changed; `error`: why applying it didn't work.
+export type Proposal = (
+  | { kind: 'agent'; agentId: string; changes: AgentChanges; before?: AgentChanges } // before: those fields as they were
+  | { kind: 'routine'; routine: RoutineInput }
+  | { kind: 'channel'; name: string; topic?: string; members: string[]; threads?: boolean }
+  | { kind: 'team'; agents: AgentDraft[]; channel?: { name: string; topic?: string; threads?: boolean } } // several agents at once, and a channel with them
+) & { reason?: string; state?: 'applied' | 'dismissed'; appliedId?: string }
+
 export type Author = { kind: 'me' } | { kind: 'agent'; id: string } | { kind: 'system' } | { kind: 'routine'; id: string }
 
 export interface Message {
@@ -201,6 +221,14 @@ export interface Message {
   run?: Run
   routine?: RoutineRun // set on the message a routine posts (author kind 'routine')
   threadId?: string // a reply in a thread: the id of the message that started it (threads are one level deep)
+  threadSummary?: ThreadSummary // on the message that started a thread: what the thread has covered
+}
+
+// A thread's own summary, kept on its first message. `until`: the `at` of the last message it covers.
+export interface ThreadSummary {
+  text: string
+  until: number
+  at: number
 }
 
 // Dictation with whisper-cli. Unset paths are looked for in the usual places.
@@ -226,10 +254,12 @@ export interface VoiceStatus {
 export interface LocalInfo {
   kind: 'image' | 'video' | 'pdf' | 'folder' | 'file'
   url?: string // to see it here: images and videos
+  download?: string // on a server, where the file isn't on this computer: to save it here
 }
 
 export interface Settings {
-  workspaceName: string
+  workspaceName: string // the person's name: what the agents call them
+  workspaceLabel?: string // the workspace's own name, in the switcher; unset: workspaceName
   context: string
   engines: Record<EngineId, EngineStatus>
   routerModel: string // a model id, or 'jev' for TypeSafe's Jev (falls back to Haiku)
@@ -245,6 +275,7 @@ export interface Settings {
   wikiDir?: string // where the wiki's folder is (an Obsidian vault, say); inside the app's data when unset
   defaultLimit: number
   approvalTtlHours: number
+  actionRules?: ActionRules // for every agent: which actions ask me first, which it does alone, which never (src/shared/actions.ts)
   theme: 'system' | 'light' | 'dark'
   language: Lang // the app's, and the language agents answer in
   openAtLogin?: boolean // so routines run without me opening the app
@@ -254,13 +285,13 @@ export interface Settings {
   paused?: boolean // "Pausar tudo": no agent starts working, no routine runs
   quietHours?: { from: string; to: string } | null // "HH:MM": routines and triggers wait, and run late when it ends; null: off
   quota?: Quota // the Claude subscription's windows, from the last reply (spec §21)
-  github?: { user?: string; error?: string } // computed: the GitHub account the app pushes and opens PRs with (spec §22)
   // The harnesses agents may run on, picked in the introduction. Unset: every one that's ready.
   harnesses?: EngineId[]
   // The first-run introduction: unset on an existing install (no intro), done:false to show it (a new install, or "Rever a introdução")
-  onboarding?: { done: boolean; checklistHidden?: boolean }
+  onboarding?: { done: boolean; checklistHidden?: boolean; workspaceManagerSeen?: boolean; carried?: boolean } // carried: the general settings came from another workspace
   folded?: string[] // the ids of what I folded in the sidebar
   sounds?: boolean // the toucan's chirp on a notification; unset: on
+  seenVersion?: string // the last version whose news I closed; an update past it shows what's new once
   accounts?: Account[] // more logins of Claude Code or Codex, beside the one each already has
 }
 
@@ -300,6 +331,9 @@ export interface BrowserElement {
   checked?: boolean
   disabled?: boolean
   inView: boolean
+  focused?: boolean // where a key goes now
+  multiline?: boolean // a text area or an editable block: Enter there often sends (a comment, a message)
+  submits?: string // a field in a form: the label of the button that sends it (what Enter does)
 }
 
 export interface BrowserReply {
@@ -366,6 +400,11 @@ export const RUN_STALL_MINUTES = 20 // no text, no tokens, no tool finishing: st
 export const REPEAT_WARN = 3 // the same call with the same result: the agent is told to change course
 export const REPEAT_STOP = 5 // ...and then the reply stops
 export const ERRORS_STOP = 8 // tool calls failing in a row
+export const SAME_TOOL_WARN = 15 // one connector tool called this many times in a reply (paging a whole history): told to narrow it
+export const SAME_TOOL_STOP = 60 // ...and past it, that tool is refused for the rest of the reply
+export const SLEEPS_FREE = 1 // commands that start by sleeping 20 s or more: the first runs, the next ones are refused
+export const SLEEPS_STOP = 4 // refused sleeps in a reply before it stops
+export const PENDING_WAIT_MINUTES = 5 // a connector result still running (a SQL statement) is awaited by the app this long
 
 // What a reply counts against limits: a token read from the cache costs about a
 // tenth of a new one, so it counts a tenth.
@@ -380,7 +419,8 @@ export const ENGINES: Record<EngineId, { label: string; cli: string; login: stri
   opencode: { label: 'OpenCode', cli: 'opencode', login: 'opencode auth login', install: 'curl -fsSL https://opencode.ai/install | bash', windows: 'npm install -g opencode-ai', site: 'https://opencode.ai' },
   pi: { label: 'Pi', cli: 'pi', login: 'pi', install: 'npm install -g @earendil-works/pi-coding-agent', site: 'https://pi.dev' },
   gemini: { label: 'Gemini CLI', cli: 'gemini', login: 'gemini', install: 'npm install -g @google/gemini-cli', site: 'https://github.com/google-gemini/gemini-cli' },
-  cursor: { label: 'Cursor CLI', cli: 'cursor-agent', login: 'cursor-agent login', install: 'curl https://cursor.com/install -fsS | bash', windows: "irm 'https://cursor.com/install?win32=true' | iex", site: 'https://cursor.com/cli' }
+  cursor: { label: 'Cursor CLI', cli: 'cursor-agent', login: 'cursor-agent login', install: 'curl https://cursor.com/install -fsS | bash', windows: "irm 'https://cursor.com/install?win32=true' | iex", site: 'https://cursor.com/cli' },
+  grok: { label: 'Grok', cli: 'grok', login: 'grok login', install: 'curl -fsSL https://x.ai/cli/install.sh | bash', site: 'https://x.ai/cli' }
 }
 export const ENGINE_IDS = Object.keys(ENGINES) as EngineId[]
 
