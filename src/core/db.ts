@@ -451,6 +451,9 @@ export class Db {
     }
     if (user_version) {
       for (const m of MIGRATIONS) for (const [sql, table, column] of m.matchAll(ADD)) if (!has(table!, column!)) this.db.exec(sql)
+      // A table is skipped the same way, and without it the app can't even start: its migration runs now.
+      const hasTable = (name: string): boolean => !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name)
+      for (const m of MIGRATIONS) for (const [, table] of m.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)) if (!hasTable(table!)) this.db.exec(m)
     }
     // Columns added by name, not by position: a database another build already moved past
     // this list's length (a branch with a migration of its own) still gets them.

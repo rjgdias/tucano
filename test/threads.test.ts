@@ -429,6 +429,28 @@ describe('the database', () => {
     check.close()
   })
 
+  it("opens a test build's database that skipped a table: the migration behind its version runs", () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'ad-db-')), 'next.db')
+    // The team's two migrations came right after threads per conversation when it was made, so its version is
+    // one short and points past main's unread table, which now sits before them. It never ran.
+    new Db(file).close()
+    const raw = new DatabaseSync(file)
+    const { user_version } = raw.prepare('PRAGMA user_version').get() as { user_version: number }
+    raw.exec(`DROP TABLE message_notifications; PRAGMA user_version = ${user_version - 1};`)
+    raw.exec("INSERT INTO conversations (id, kind, name, created_at) VALUES ('c1', 'channel', 'geral', 1)")
+    raw.exec("INSERT INTO messages (id, conversation_id, author_kind, text, at) VALUES ('m1', 'c1', 'me', 'oi', 1)")
+    raw.close()
+
+    const reopened = new Db(file)
+    expect(reopened.conversations().map((c) => c.id)).toContain('c1')
+    expect(reopened.message('m1')?.text).toBe('oi')
+    reopened.close()
+    const check = new DatabaseSync(file)
+    expect((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(user_version)
+    expect(check.prepare("SELECT 1 FROM sqlite_master WHERE name = 'message_notifications'").get()).toBeTruthy()
+    check.close()
+  })
+
   it('an existing database gains thread_id, thread_summary and threads, and round-trips them', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'ad-db-')), 'old.db')
     // A database from before threads, with a message in it: the schema back to before the threads'
