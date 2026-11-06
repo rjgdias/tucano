@@ -37,6 +37,7 @@ import {
   type ToolClass,
   type Trigger
 } from '../shared/types'
+import type { JobWatch } from '../shared/job-watch'
 
 const JEV_KEY = 'typesafe:key' // jev.ts's JEV_SECRET: the router's key goes with the general settings
 
@@ -313,6 +314,14 @@ const MIGRATIONS = [
   `,
   `
   ALTER TABLE conversations ADD COLUMN request TEXT;
+  `,
+  `
+  ALTER TABLE agents ADD COLUMN job_watch INTEGER NOT NULL DEFAULT 0;
+  CREATE TABLE IF NOT EXISTS job_watches (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
   `
 ]
 
@@ -513,6 +522,7 @@ export class Db {
       computerKind: str(r['computer_kind']) === 'mac' ? 'mac' : 'linux',
       web: r['web'] !== 0,
       browser: r['browser'] === 1,
+      ...(r['job_watch'] === 1 ? { jobWatch: true } : {}),
       apps: JSON.parse(str(r['apps']) || '[]') as AgentApp[],
       ...(r['custom_color'] ? { customColor: str(r['custom_color']) } : {}),
       ...(r['picture'] ? { picture: str(r['picture']) } : {}),
@@ -540,14 +550,14 @@ export class Db {
   saveAgent(a: Agent): void {
     this.db
       .prepare(
-        `INSERT INTO agents (id, name, handle, role, color, instructions, model, fallback_model, fallback_account, account, effort, limit_tokens, max_routines, grants, memory_mode, computer, computer_kind, web, browser, apps, auto_approve, action_rules, ssh, archived, kind, custom_color, picture, avatar, wiki, team, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO agents (id, name, handle, role, color, instructions, model, fallback_model, fallback_account, account, effort, limit_tokens, max_routines, grants, memory_mode, computer, computer_kind, web, browser, job_watch, apps, auto_approve, action_rules, ssh, archived, kind, custom_color, picture, avatar, wiki, team, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET name = excluded.name, handle = excluded.handle, role = excluded.role,
            color = excluded.color, instructions = excluded.instructions, model = excluded.model, fallback_model = excluded.fallback_model, fallback_account = excluded.fallback_account, account = excluded.account, effort = excluded.effort,
            limit_tokens = excluded.limit_tokens, max_routines = excluded.max_routines, grants = excluded.grants, memory_mode = excluded.memory_mode,
-           computer = excluded.computer, computer_kind = excluded.computer_kind, web = excluded.web, browser = excluded.browser, apps = excluded.apps, auto_approve = excluded.auto_approve, action_rules = excluded.action_rules, ssh = excluded.ssh, archived = excluded.archived, kind = COALESCE(excluded.kind, agents.kind), custom_color = excluded.custom_color, picture = excluded.picture, avatar = excluded.avatar, wiki = excluded.wiki, team = excluded.team`
+           computer = excluded.computer, computer_kind = excluded.computer_kind, web = excluded.web, browser = excluded.browser, job_watch = excluded.job_watch, apps = excluded.apps, auto_approve = excluded.auto_approve, action_rules = excluded.action_rules, ssh = excluded.ssh, archived = excluded.archived, kind = COALESCE(excluded.kind, agents.kind), custom_color = excluded.custom_color, picture = excluded.picture, avatar = excluded.avatar, wiki = excluded.wiki, team = excluded.team`
       )
-      .run(a.id, a.name, a.handle, a.role, a.color, a.instructions, a.modelId, a.fallbackModelId || null, a.fallbackAccountId || null, a.accountId || null, a.effort, a.limit, routineCap(a.maxRoutines), JSON.stringify(a.grants), a.memory ?? 'auto', a.computer ? 1 : 0, a.computerKind === 'mac' ? 'mac' : 'linux', a.web === false ? 0 : 1, a.browser ? 1 : 0, JSON.stringify(a.apps ?? []), JSON.stringify(a.autoApprove ?? []), JSON.stringify(cleanRules(a.actionRules)), a.ssh ? 1 : 0, a.archived ? 1 : 0, a.kind ?? null, a.customColor ?? null, a.picture ?? null, a.avatar ? JSON.stringify(a.avatar) : null, a.wiki ?? null, JSON.stringify((a.team ?? []).filter((id) => id !== a.id)), Date.now())
+      .run(a.id, a.name, a.handle, a.role, a.color, a.instructions, a.modelId, a.fallbackModelId || null, a.fallbackAccountId || null, a.accountId || null, a.effort, a.limit, routineCap(a.maxRoutines), JSON.stringify(a.grants), a.memory ?? 'auto', a.computer ? 1 : 0, a.computerKind === 'mac' ? 'mac' : 'linux', a.web === false ? 0 : 1, a.browser ? 1 : 0, a.jobWatch ? 1 : 0, JSON.stringify(a.apps ?? []), JSON.stringify(a.autoApprove ?? []), JSON.stringify(cleanRules(a.actionRules)), a.ssh ? 1 : 0, a.archived ? 1 : 0, a.kind ?? null, a.customColor ?? null, a.picture ?? null, a.avatar ? JSON.stringify(a.avatar) : null, a.wiki ?? null, JSON.stringify((a.team ?? []).filter((id) => id !== a.id)), Date.now())
   }
 
   // Kept apart from saveAgent: folders change only after the core checks them.
@@ -1172,6 +1182,21 @@ export class Db {
 
   removeRoutine(id: string): void {
     this.db.prepare('DELETE FROM routines WHERE id = ?').run(id)
+  }
+
+  // ---------- job watches ----------
+
+  jobWatches(): JobWatch[] {
+    return (this.db.prepare('SELECT data FROM job_watches ORDER BY created_at').all() as Row[]).map((r) => JSON.parse(str(r['data'])) as JobWatch)
+  }
+
+  jobWatch(id: string): JobWatch | undefined {
+    const r = this.db.prepare('SELECT data FROM job_watches WHERE id = ?').get(id) as Row | undefined
+    return r ? (JSON.parse(str(r['data'])) as JobWatch) : undefined
+  }
+
+  saveJobWatch(w: JobWatch): void {
+    this.db.prepare('INSERT INTO job_watches (id, data, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET data = excluded.data').run(w.id, JSON.stringify(w), w.createdAt)
   }
 
   // ---------- skills ----------
