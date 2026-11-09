@@ -7,12 +7,13 @@
 **Seu time de agentes de IA, no seu computador. Suas regras.**
 
 Agentes que conversam em canais, programam, revisam um ao outro e usam as ferramentas do seu time.<br>
-Eles fazem o trabalho. O que mexe no mundo espera o seu sim.
+Eles fazem o trabalho. O que mexe no mundo espera o seu sim.<br>
+Uma alternativa grátis e open source ao Grok Bot: [veja a comparação](https://tucano.sh/alternativa-grok-bot/).
 
 [![Release](https://img.shields.io/github/v/release/eduwxyz/tucano?color=FF8A1F&label=release)](https://github.com/eduwxyz/tucano/releases/latest)
 [![Licença](https://img.shields.io/badge/licen%C3%A7a-Apache--2.0-141210)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-chip%20Apple%20%7C%20Intel-141210?logo=apple)](#instalar) [![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM64-141210?logo=linux&logoColor=white)](#instalar) [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-141210)](#instalar)
-[![Roda no](https://img.shields.io/badge/roda%20no-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20OpenCode%20·%20Pi-E2541B)](#roda-no-que-você-já-tem)
+[![Roda no](https://img.shields.io/badge/roda%20no-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Grok%20·%20OpenCode%20·%20Pi-E2541B)](#roda-no-que-você-já-tem)
 
 [English](README.md) · **Português** · [tucano.sh](https://tucano.sh) · [@tucanosh](https://x.com/tucanosh) · [Novidades](CHANGELOG.md)
 
@@ -28,7 +29,7 @@ Os agentes de código ficaram bons. Trabalhar com *vários* deles ainda é uma b
 
 - **Um time, não uma caixa de prompt.** Agentes com nome, papel, ferramentas e memória. Eles conversam em canais, se chamam com `@menção` e passam o trabalho adiante: um acha o erro, outro corrige, um terceiro revisa, e o resultado chega pra você.
 - **Suas regras.** Cada agente só enxerga as ferramentas que você deu, com *sem acesso*, *ler* ou *ler e escrever* em cada uma. Merge, compra, post, e-mail e exclusão viram um pedido de aprovação amarrado à ação exata, no computador ou no celular.
-- **Roda no que você já tem.** Os agentes pensam com o Claude Code, o Codex, o Cursor CLI, o OpenCode ou o Pi do seu computador, do jeito que você configurou: na sua assinatura, no gateway de IA da sua empresa ou nos seus provedores. Sem chave de API pra colar, sem cobrança por token da nossa parte, e o Tucano nunca vê a sua senha.
+- **Roda no que você já tem.** Os agentes pensam com o Claude Code, o Codex, o Cursor CLI, o Grok, o OpenCode ou o Pi do seu computador, do jeito que você configurou: na sua assinatura, no gateway de IA da sua empresa ou nos seus provedores. Sem chave de API pra colar, sem cobrança por token da nossa parte, e o Tucano nunca vê a sua senha.
 - **Tudo fica no seu computador.** Conversas, memória, logins, arquivos. Não existe servidor do Tucano.
 
 ## O que ele faz
@@ -90,6 +91,7 @@ Dê a um agente os apps do seu computador, como Notas, Calendário ou Spotify, c
 | [Cursor CLI](https://cursor.com/cli) | Sua conta do Cursor (`cursor-agent login`) | Roda com um home próprio, pra não carregar seus hooks, plugins, skills e os servidores do `~/.cursor/mcp.json`; a leitura, a escrita e o shell do próprio Cursor ficam desligados; cada resposta soma uns 10 mil tokens do prompt do próprio Cursor |
 | [OpenCode](https://opencode.ai) | Os provedores que você configurou | Usa os modelos em que você tem login |
 | [Pi](https://pi.dev) | Os provedores que você configurou | Usa os modelos em que você tem login |
+| [Grok](https://x.ai/cli) | grok.com (`grok login`) | Roda com uma pasta pessoal própria, pra não carregar os seus servidores MCP, skills, hooks e plugins (do Grok e os instalados pro Claude Code ou Cursor); o shell e os arquivos do próprio Grok ficam desligados; só o gateway do Tucano; uma `XAI_API_KEY` no ambiente é retirada quando o grok.com está logado, pra a assinatura não ser cobrada como API. O instalador oficial é macOS e Linux |
 
 Cada agente escolhe o harness e o modelo, então um time pode misturar: Opus pra corrigir, GPT pra revisar, Haiku pra rotear.
 
@@ -152,7 +154,7 @@ No Linux e no Windows, use **Ctrl** no lugar do **⌘**. Fechar a janela deixa o
 
 - **Conectar uma ferramenta:** **Conectores → Adicionar**, cole o endereço do servidor MCP. Os com OAuth abrem o navegador; os outros pedem um token. Depois, na página de cada agente, escolha o acesso dele a cada conector.
 - **Agentes arquivados** saem da barra lateral e param de responder, mas o histórico e os recibos ficam. Eles aparecem em **Arquivados**, pra reativar.
-- **Aprovar pelo celular:** conecte o bot do Telegram em **Configurações → Celular e GitHub**; aprovações e perguntas chegam com os botões.
+- **Aprovar pelo celular:** conecte o bot do Telegram em **Configurações → Celular**; aprovações e perguntas chegam com os botões.
 - **Primeiros passos**, na barra lateral, leva você pelo resto: montar um time, conectar uma ferramenta, ensinar a memória, agendar uma rotina, emprestar um projeto.
 
 ## Como funciona
@@ -161,7 +163,7 @@ No Linux e no Windows, use **Ctrl** no lugar do **⌘**. Fechar a janela deixa o
 flowchart LR
   subgraph Mac["Seu computador"]
     UI["Janela<br/>(React)"] <-->|MessagePort| Core["Núcleo<br/>SQLite · respostas · memória · rotinas"]
-    Core -->|"um turno, isolado"| CLI["CLI do harness<br/>claude · codex · cursor · opencode · pi"]
+    Core -->|"um turno, isolado"| CLI["CLI do harness<br/>claude · codex · cursor · grok · opencode · pi"]
     CLI -->|"URL secreta por turno<br/>só as ferramentas do agente"| GW["Gateway MCP do Tucano"]
     GW --> Tools["Conectores (MCP)<br/>computador · navegador · memória"]
     GW -.->|"ação de escrita"| OK{{"Sua aprovação"}}

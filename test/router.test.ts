@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseRoute, routerPrompt } from '../src/core/router'
+import { handoffPrompt, handoffSystem, parseRoute, replyExcerpt, routerPrompt } from '../src/core/router'
 import type { Agent, Connector, Message } from '../src/shared/types'
 
 const agent = (id: string, handle: string, role: string, instructions = ''): Agent => ({
@@ -72,5 +72,87 @@ describe('routerPrompt', () => {
     const p = routerPrompt({ messages: [], agents: [withAccess, { ...nina, grants: { k1: 'none' } }], me: 'Edu', connectors: [linear, demo] })
     expect(p).toContain('- lia: Lia, Engenharia: Ajuda com código e bugs. · acessa: Linear (só leitura), Demo (leitura e escrita)')
     expect(p).toContain('- nina: Nina, Conteúdo · acessa: nenhum sistema externo')
+  })
+})
+
+describe('handoffPrompt', () => {
+  const messages: Message[] = [
+    { id: 'm1', conversationId: 'c', author: { kind: 'me' }, text: 'revisa o build', at: 1 },
+    { id: 'm2', conversationId: 'c', author: { kind: 'system' }, text: 'Chamei Lia', at: 2 }
+  ]
+  const p = handoffPrompt({ reply: 'Valeu, @nina!', author: lia, candidates: [nina], messages, members: team, me: 'Edu' })
+
+  it('lists the mentioned agents with role, and marks the reply being judged', () => {
+    expect(p).toContain('- nina: Nina, Conteúdo')
+    expect(p).not.toContain('- lia:')
+    expect(p).toContain('<reply>\nValeu, @nina!\n</reply>')
+    expect(p).toContain('Lia')
+  })
+
+  it('includes the recent messages and skips system notes', () => {
+    expect(p).toContain('[Edu] revisa o build')
+    expect(p).not.toContain('Chamei')
+  })
+
+  it('says who is already replying, only when someone is', () => {
+    expect(p).not.toContain('Já estão respondendo')
+    const busy = handoffPrompt({ reply: 'Valeu, @nina!', author: lia, candidates: [nina], busy: [nina], messages, members: team, me: 'Edu' })
+    expect(busy).toContain('Já estão respondendo aqui: Nina.')
+    expect(busy).toContain('algo novo')
+  })
+
+  it('does not count waiting for someone as a request', () => {
+    expect(handoffSystem()).toContain('Fico esperando o aviso do Léo')
+  })
+})
+
+describe('replyExcerpt', () => {
+  // A long plan, written line by line, with the ask at the very end.
+  const plan = Array.from({ length: 80 }, (_, i) => `Passo ${i + 1}: ajustar o módulo ${i + 1} e conferir o resultado.`).join('\n')
+  const ask = '@nina, preciso de duas decisões:\n1. aprova a ordem?\n2. aprova começar pelo levantamento?'
+
+  it('keeps a short reply whole', () => {
+    expect(replyExcerpt('  Valeu, @nina!  ', ['nina'])).toBe('Valeu, @nina!')
+  })
+
+  it('keeps the opening and the lines around a mention at the end of a long reply', () => {
+    const out = replyExcerpt(`${plan}\n\n${ask}`, ['nina'])
+    expect(out.startsWith('Passo 1:')).toBe(true)
+    expect(out).toContain(ask)
+    expect(out).toContain('\n[…]\n')
+    expect(out).not.toContain('Passo 30:')
+    expect(out.length).toBeLessThan(4000)
+  })
+
+  it('marks a cut at the end, and ignores handles inside code or not asked about', () => {
+    const out = replyExcerpt(`${plan}\n\`@nina\` @lia`, ['nina'])
+    expect(out.endsWith('\n[…]')).toBe(true)
+    expect(out).not.toContain('@lia')
+  })
+
+  it('stays bounded when a long reply names someone on every line', () => {
+    const busy = Array.from({ length: 400 }, (_, i) => `Item ${i + 1}: @nina confere o módulo ${i + 1}.`).join('\n')
+    const out = replyExcerpt(busy, ['nina'])
+    expect(out).toContain('Item 400:')
+    expect(out).not.toContain('Item 200:')
+    expect(out.length).toBeLessThan(1000 + 2 * (600 + 1200) + 500)
+  })
+
+  it('goes into the hand-off prompt, which says it was cut', () => {
+    const p = handoffPrompt({ reply: `${plan}\n\n${ask}`, author: lia, candidates: [nina], messages: [], members: team, me: 'Edu' })
+    expect(p).toContain(ask)
+    expect(p).toContain('[…] marca o que ficou de fora')
+  })
+})
+
+describe('parseRoute with hand-off candidates', () => {
+  it('accepts an empty list and drops handles outside the candidates', () => {
+    expect(parseRoute('{"handles":[],"reason":"agradecimento"}', [nina])).toEqual({ agents: [], reason: 'agradecimento' })
+    expect(parseRoute('{"handles":["lia","nina"],"reason":""}', [nina])?.agents).toEqual([nina])
+  })
+
+  it('keeps all three when a reply hands the turn to three candidates', () => {
+    const three = [lia, nina, agent('a3', 'theo', 'Dados')]
+    expect(parseRoute('{"handles":["lia","nina","theo"],"reason":"pedido"}', three, three.length)?.agents).toEqual(three)
   })
 })
