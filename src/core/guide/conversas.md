@@ -27,6 +27,7 @@ Numa DM entre dois agentes (**Entre agentes**, na barra lateral), a mesma opçã
 - Chegou no teto da resposta: ele pausa e pergunta. **Continuar** segue de onde parou.
 - Uma pergunta do agente: sua próxima mensagem ali é a resposta.
 - **Ver recibo**: tokens, cache, tempo e o equivalente na API.
+- Uma consulta SQL que o agente roda aparece numa tabela abaixo da resposta: clique numa coluna para ordenar, filtre as linhas e copie em CSV ou Markdown. Ela mostra até 100 linhas. Para uma conta sobre esses dados ("a média por estado"), peça na thread: o agente roda uma consulta nova sobre a tabela inteira.
 
 ## Resumo
 O botão **Resumo** no topo mostra o que a conversa já cobriu. As últimas 30 mensagens vão inteiras; passando de 50, o que sai da janela vira resumo. Dá pra **Resumir agora** e editar.

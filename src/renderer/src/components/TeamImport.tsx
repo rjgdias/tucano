@@ -4,7 +4,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { L } from '../../../shared/lang'
 import type { TeamChange, TeamChoice, TeamItemKind, TeamPackageInfo, TeamUpdate } from '../../../shared/types'
-import { forgetTeam, importTeam, teams } from '../store'
+import { amAdmin, forgetTeam, importTeam, teams, useStore } from '../store'
 import { confirmDialog } from './Dialogs'
 import { Modal } from './Modal'
 import { Diff } from './Skills'
@@ -189,8 +189,12 @@ export function TeamImportDialog({ text, update, onClose, onDone }: { text: stri
 // The teams imported or exported here, and what differs here from each one's last file.
 export function KnownTeams({ version }: { version: number }): ReactNode {
   const [list, setList] = useState<TeamPackageInfo[]>([])
+  const admin = useStore(amAdmin)
   const refresh = (): void => void teams().then(setList, () => undefined)
-  useEffect(refresh, [version])
+  useEffect(() => {
+    if (admin) refresh() // the admins' to read
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version, admin])
   const forget = async (t: TeamPackageInfo): Promise<void> => {
     const ok = await confirmDialog({
       title: L(`Esquecer ${t.name}?`, `Forget ${t.name}?`),

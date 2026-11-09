@@ -50,7 +50,7 @@ const of = (id: string): Message[] => db.messages().filter((m) => m.author.kind 
 
 beforeEach(async () => {
   db = new Db(join(mkdtempSync(join(tmpdir(), 'aq-db-')), 'test.db'))
-  settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, gemini: ready, cursor: ready, grok: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
+  settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, antigravity: ready, cursor: ready, grok: ready, cline: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
   db.saveAgent(agent('dev', 'Engenharia'))
   db.saveAgent(agent('ana', 'Dados'))
   db.createConversation({ id: 'c', kind: 'channel', name: 'geral', members: ['dev', 'ana'] })
@@ -64,7 +64,7 @@ afterEach(() => gateway.stop())
 describe('an agent does one thing at a time in each place', () => {
   const run = (): { r: Runner; events: Message[] } => {
     const events: Message[] = []
-    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
+    const engines: Record<EngineId, Engine> = { claude: slow, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), antigravity: fakeEngine('antigravity'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok'), cline: fakeEngine('cline') }
     const r = new Runner({ db, engines, settings: async () => settings, emit: (e) => e.type === 'message' && events.push(e.message), workDir: mkdtempSync(join(tmpdir(), 'aq-w-')), gateway })
     return { r, events }
   }
@@ -105,7 +105,7 @@ describe('an agent does one thing at a time in each place', () => {
     const { r } = run()
     await r.send('c', '@dev revisa o PR 12')
     await until(() => turns.length === 1)
-    db.saveMessage({ id: 'old', conversationId: 'c', author: { kind: 'me' }, text: 'o build de ontem', at: 1 })
+    db.saveMessage({ id: 'old', conversationId: 'c', author: { kind: 'person', id: db.ownerId() }, text: 'o build de ontem', at: 1 })
     await r.send('c', '@dev depois olha o build', [], 'old')
     await r.send('d', 'e os testes?')
     await until(() => turns.length === 3)

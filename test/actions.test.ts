@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { actionMode, chainMode, cleanRules, DEFAULT_ACTION_MODE, gate, shellActions, simpleCommands, toolActions } from '../src/shared/actions'
+import { actionMode, cleanRules, gate, policyOf, shellActions, simpleCommands, toolActions, verdict, type Policy } from '../src/shared/actions'
 
 describe('shellActions', () => {
   it('finds the git actions that matter', () => {
@@ -115,36 +115,75 @@ describe('toolActions', () => {
 })
 
 describe('rules', () => {
-  it('asks for everything out of the box', () => {
-    expect(Object.values(DEFAULT_ACTION_MODE).every((m) => m === 'ask')).toBe(true)
-    expect(actionMode('commit')).toBe('ask')
+  it('out of the box no rule decides: the tool says, as before levels', () => {
+    expect(actionMode('commit', {})).toBeUndefined()
+    expect(actionMode('commit', { globalLevel: 'careful' })).toBe('ask')
+    expect(actionMode('commit', { globalLevel: 'free' })).toBe('auto')
   })
 
-  it("lets the agent's rule win over the one in Settings", () => {
-    expect(actionMode('commit', undefined, { commit: 'auto' })).toBe('auto')
-    expect(actionMode('commit', { commit: 'ask' }, { commit: 'auto' })).toBe('ask')
-    expect(actionMode('push', { commit: 'auto' }, { push: 'off' })).toBe('off')
+  it("the agent's rule, then its own level, then Settings' rule, then Settings' level", () => {
+    expect(actionMode('commit', { globalRules: { commit: 'auto' } })).toBe('auto')
+    expect(actionMode('commit', { agentRules: { commit: 'ask' }, globalRules: { commit: 'auto' } })).toBe('ask')
+    expect(actionMode('push', { agentRules: { commit: 'auto' }, globalRules: { push: 'off' } })).toBe('off')
+    expect(actionMode('push', { agentLevel: 'free', globalRules: { push: 'off' } })).toBe('auto')
+    expect(actionMode('push', { agentLevel: 'normal', globalRules: { push: 'off' }, globalLevel: 'free' })).toBe('off')
+    expect(actionMode('push', { agentLevel: 'normal', globalLevel: 'free' })).toBeUndefined()
   })
 
-  it('stops a call when any of its kinds is never, else waits when any asks', () => {
-    expect(gate(['commit', 'push'], {}, { commit: 'auto' })).toEqual({ mode: 'ask', kinds: ['push'] })
-    expect(gate(['commit', 'push'], { push: 'off' }, {})).toEqual({ mode: 'off', kinds: ['push'] })
-    expect(gate(['commit', 'push'], { commit: 'auto', push: 'auto' }, {})).toEqual({ mode: 'auto', kinds: ['commit', 'push'] })
-    expect(gate([], {}, {})).toEqual({ mode: 'auto', kinds: [] })
+  it('stops a call when any of its kinds is never, else waits when any asks, and runs alone only when all say so', () => {
+    expect(gate(['commit', 'push'], { globalRules: { commit: 'auto' }, globalLevel: 'careful' })).toEqual({ mode: 'ask', kinds: ['push'] })
+    expect(gate(['commit', 'push'], { agentRules: { push: 'off' } })).toEqual({ mode: 'off', kinds: ['push'] })
+    expect(gate(['commit', 'push'], { agentRules: { commit: 'auto', push: 'auto' } })).toEqual({ mode: 'auto', kinds: ['commit', 'push'] })
+    expect(gate(['commit', 'push'], { agentRules: { commit: 'auto' } })).toEqual({ kinds: ['push'] })
+    expect(gate([], {})).toEqual({ kinds: [] })
   })
 
-  it('on a delegated task, takes the strictest rule of the chain', () => {
-    expect(chainMode('push', { push: 'auto' }, {}, [{ push: 'off' }])).toBe('off')
-    expect(chainMode('push', { push: 'auto' }, {}, [{ push: 'auto' }, {}])).toBe('ask') // the one above follows the default
-    expect(chainMode('push', { push: 'ask' }, { push: 'auto' }, [{}])).toBe('ask')
-    expect(chainMode('push', {}, { push: 'auto' }, [{}])).toBe('auto')
-    expect(gate(['push'], { push: 'auto' }, {}, [{ push: 'off' }])).toEqual({ mode: 'off', kinds: ['push'], above: true })
-    expect(gate(['push'], { push: 'off' }, {}, [{ push: 'off' }])).toEqual({ mode: 'off', kinds: ['push'] })
+  it('reads the policy off an agent and Settings, with the guard on unless someone turned it off', () => {
+    expect(policyOf(undefined, {}).guard).toBe(true)
+    expect(policyOf({ outsideGuard: false }, { outsideGuard: true }).guard).toBe(false)
+    expect(policyOf({}, { outsideGuard: false }).guard).toBe(false)
   })
-
   it('keeps only known kinds and modes', () => {
     expect(cleanRules({ commit: 'auto', push: 'maybe', rm: 'off', pr: 'off' })).toEqual({ commit: 'auto', pr: 'off' })
     expect(cleanRules(null)).toEqual({})
     expect(cleanRules('x')).toEqual({})
+  })
+})
+
+describe('what happens to a call', () => {
+  const normal: Policy = { guard: true }
+  const careful: Policy = { globalLevel: 'careful', guard: true }
+  const free: Policy = { globalLevel: 'free', guard: true }
+  const v = (o: Partial<Parameters<typeof verdict>[0]>) => verdict({ cls: 'write', kinds: [], p: normal, ...o })
+
+  it('normal is how Tucano always worked', () => {
+    expect(v({ cls: 'read' }).run).toBe(true)
+    expect(v({ cls: 'write' }).run).toBe(true)
+    expect(v({ cls: 'sensitive', kinds: ['delete'] })).toMatchObject({ run: false, why: 'class' })
+    expect(v({ cls: 'sensitive', kinds: ['delete'], alwaysAllowed: true })).toMatchObject({ run: true, why: 'always' })
+    expect(v({ askByDefault: true, kinds: ['browser'] })).toMatchObject({ run: false })
+  })
+
+  it('careful asks before any change, even one approved for good, and still reads freely', () => {
+    expect(v({ p: careful, cls: 'read' }).run).toBe(true)
+    expect(v({ p: careful, cls: 'write' })).toMatchObject({ run: false, why: 'level' })
+    expect(v({ p: careful, cls: 'sensitive', kinds: ['send'], alwaysAllowed: true })).toMatchObject({ run: false })
+  })
+
+  it('no guardrails runs everything, but never what is high risk or turned off', () => {
+    expect(v({ p: free, cls: 'sensitive', kinds: ['delete'] }).run).toBe(true)
+    expect(v({ p: free, cls: 'sensitive' }).run).toBe(true)
+    expect(v({ p: free, askByDefault: true, kinds: ['browser'] }).run).toBe(true)
+    expect(v({ p: free, cls: 'sensitive', kinds: ['delete'], highRisk: true })).toMatchObject({ run: false, why: 'risk' })
+    expect(v({ p: { ...free, agentRules: { pay: 'off' } }, cls: 'sensitive', kinds: ['pay'] })).toMatchObject({ run: false, off: true })
+  })
+
+  it('after something from outside, the guard asks before what goes out or cannot be undone, and only that', () => {
+    expect(v({ p: free, cls: 'sensitive', kinds: ['send'], outside: true })).toMatchObject({ run: false, why: 'guard' })
+    expect(v({ p: free, cls: 'sensitive', kinds: ['delete'], outside: true })).toMatchObject({ run: false, why: 'guard' })
+    expect(v({ p: free, cls: 'sensitive', outside: true })).toMatchObject({ run: false, why: 'guard' })
+    expect(v({ p: free, cls: 'write', kinds: ['commit'], outside: true }).run).toBe(true)
+    expect(v({ p: { ...normal, agentRules: { send: 'auto' } }, cls: 'sensitive', kinds: ['send'], outside: true })).toMatchObject({ run: false, why: 'guard' })
+    expect(v({ p: { ...free, guard: false }, cls: 'sensitive', kinds: ['send'], outside: true }).run).toBe(true)
   })
 })

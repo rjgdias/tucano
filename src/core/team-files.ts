@@ -243,7 +243,7 @@ interface Local {
   fields: Fields
 }
 
-function localItems(db: Db, context: string): Local[] {
+function localItems(db: Db, context: string, by = db.ownerId()): Local[] {
   const agents = db.agents().filter((a) => !a.archived && a.kind !== 'tuca') // each install has its own Tuca
   const handle = (id: string): string | undefined => agents.find((a) => a.id === id)?.handle
   const connectors = db.connectors()
@@ -278,7 +278,9 @@ function localItems(db: Db, context: string): Local[] {
   for (const k of db.skills().filter((x) => x.state === 'active')) out.push({ kind: 'skill', localId: k.id, fields: { name: k.name, description: k.description, agents: sorted(k.agents.flatMap((id) => handle(id) ?? [])), body: k.body } })
   for (const r of db.routines()) {
     const agent = handle(r.agentId)
-    if (!agent) continue
+    // A routine in a DM goes only when the DM is theirs: no one takes another person's DM along.
+    const place = db.conversationOwner(r.conversationId)
+    if (!agent || !place || (place.kind === 'dm' && (place.owner ?? db.ownerId()) !== by)) continue
     const conv = db.conversation(r.conversationId)
     const t = r.trigger
     const trigger = t?.kind === 'poll' ? { kind: 'poll', connector: connectorName(t.connectorId), tool: t.tool, args: t.args, everyMinutes: t.everyMinutes } : t ? { kind: 'webhook' } : undefined
@@ -304,12 +306,14 @@ export interface Applied {
 }
 
 export class TeamFiles {
+  private by?: string // who is importing: what comes in is theirs
+
   constructor(private deps: TeamFilesDeps) {
     mkdirSync(deps.dir, { recursive: true })
   }
 
-  private locals(): Local[] {
-    return localItems(this.deps.db, this.deps.context())
+  private locals(by?: string): Local[] {
+    return localItems(this.deps.db, this.deps.context(), by)
   }
   private all(): Follow[] {
     return readdirSync(this.deps.dir)
@@ -413,7 +417,8 @@ export class TeamFiles {
   // Applies the chosen changes: new items come in (routines off, connectors waiting for each
   // person's sign-in), updates take the file's fields where I hadn't changed them and, on a
   // conflict, the side I picked. 'later' leaves a change to be offered again next import.
-  apply(text: string, choices: Record<string, TeamChoice>): Applied {
+  apply(text: string, choices: Record<string, TeamChoice>, by = this.deps.db.ownerId()): Applied {
+    this.by = by
     const team = parseTeam(text)
     const f = this.find(team.id) ?? { id: team.id, name: team.name, revision: 0, base: [], links: {}, at: Date.now() }
     const changes = this.diff(f, team)
@@ -481,11 +486,11 @@ export class TeamFiles {
   // new one the first time), with that team's ids, so whoever imports it gets updates, not copies.
   // What I said no to goes on as the team had it. The base stays what I last took in: another
   // file made from it in the meantime still merges with mine field by field.
-  export(): string {
+  export(by = this.deps.db.ownerId()): string {
     const f = this.all().sort((a, b) => b.at - a.at)[0] ?? { id: randomUUID(), name: this.deps.name() ? L(`Time de ${this.deps.name()}`, `${this.deps.name()}'s team`) : L('Time do Tucano', 'Tucano team'), revision: 0, base: [], links: {}, at: Date.now() }
     const first = f.revision === 0
     const ids = new Map(Object.entries(f.links).filter(([, lid]) => lid).map(([k, lid]) => [`${kindOf(k)}:${lid}`, k.slice(k.indexOf(':') + 1)]))
-    const items: Item[] = this.locals()
+    const items: Item[] = this.locals(by)
       .filter((l) => l.kind !== 'context' || str(l.fields['text']).trim())
       .map((l) => ({ kind: l.kind, id: ids.get(`${l.kind}:${l.localId}`) ?? l.localId, fields: l.fields }))
     for (const b of f.base) if (f.links[keyOf(b)] === '') items.push(b)
@@ -513,10 +518,11 @@ export class TeamFiles {
   private conversation(where: string, agentId: string): string | undefined {
     const { db } = this.deps
     if (where === 'dm') {
-      const dm = db.conversations().find((c) => c.kind === 'dm' && c.name === agentId)
+      const by = this.by ?? db.ownerId()
+      const dm = db.conversations().find((c) => c.kind === 'dm' && c.name === agentId && (c.owner ?? db.ownerId()) === by)
       if (dm) return dm.id
       const id = randomUUID()
-      db.createConversation({ id, kind: 'dm', name: agentId, members: [agentId] })
+      db.createConversation({ id, kind: 'dm', name: agentId, members: [agentId], owner: by })
       return id
     }
     return db.conversations().find((c) => c.kind === 'channel' && `#${c.name}` === where)?.id
@@ -576,7 +582,7 @@ export class TeamFiles {
       }
       case 'channel':
         if (db.conversations().some((c) => c.kind === 'channel' && c.name === str(f['name']))) return void done.skipped.push(`#${str(f['name'])}`)
-        db.createConversation({ id, kind: 'channel', name: str(f['name']), topic: str(f['topic']) || undefined, members: ((f['members'] as string[] | undefined) ?? []).flatMap((h) => handles.agent(h) ?? []) })
+        db.createConversation({ id, kind: 'channel', name: str(f['name']), topic: str(f['topic']) || undefined, members: ((f['members'] as string[] | undefined) ?? []).flatMap((h) => handles.agent(h) ?? []), createdBy: this.by ?? db.ownerId() })
         return id
       case 'skill': {
         const at = Date.now()
@@ -591,7 +597,7 @@ export class TeamFiles {
         if (trigger === null) return undefined
         const conversationId = this.conversation(str(f['where']) || 'dm', agentId)
         if (!conversationId) return void done.skipped.push(L(`a rotina "${name}" (o canal ${str(f['where'])} não está aqui)`, `the routine "${name}" (channel ${str(f['where'])} isn't here)`))
-        const routine: Routine = { id, name, agentId, conversationId, prompt: str(f['prompt']), schedule: (f['schedule'] as Schedule | undefined) ?? { days: [], time: '' }, trigger, enabled: false, createdAt: Date.now() }
+        const routine: Routine = { id, name, agentId, conversationId, prompt: str(f['prompt']), schedule: (f['schedule'] as Schedule | undefined) ?? { days: [], time: '' }, trigger, enabled: false, createdAt: Date.now(), owner: this.by ?? db.ownerId() }
         db.saveRoutine(routine)
         return id
       }

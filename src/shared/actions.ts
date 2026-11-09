@@ -1,24 +1,28 @@
-// Actions that matter (a commit, a push, a PR, a merge, deleting, sending, publishing,
-// paying) and what an agent does about each: asks me first, does it alone, or never.
-// Set for everyone in Settings and per agent on its page; reading never asks.
-// The gateway reads a call (a shell command, a connector tool) into these kinds
-// before it runs, so a call that matches an "ask" rule waits for my answer.
+// How far an agent goes on its own. Each agent has a level (careful, normal, free) and,
+// over it, a rule per kind of action that matters (a commit, a push, a PR, a merge,
+// deleting, sending, publishing, paying, a risky click in its browser or in an app):
+// asks me first, does it alone, or never. Settings hold the level and rules for every
+// agent; an agent's page, its own. Reading never asks.
+// The gateway reads a call (a shell command, a connector tool, a click) into these kinds
+// before it runs; what no rule decides goes as the tool's class says, as it always has.
 import { L } from './lang'
 
 // The "connector" of approvals for a command on the agent's computer.
 export const COMPUTADOR = 'computador'
 
-export const ACTION_KINDS = ['commit', 'push', 'pr', 'merge', 'delete', 'send', 'publish', 'pay'] as const
+export const ACTION_KINDS = ['commit', 'push', 'pr', 'merge', 'delete', 'send', 'publish', 'pay', 'browser', 'apps'] as const
 export type ActionKind = (typeof ACTION_KINDS)[number]
 export type ActionMode = 'ask' | 'auto' | 'off'
 export type ActionRules = Partial<Record<ActionKind, ActionMode>>
 
 const MODES: readonly ActionMode[] = ['ask', 'auto', 'off']
 
-// Out of the box every kind asks: it's the person who loosens a rule, never the app.
-export const DEFAULT_ACTION_MODE: Record<ActionKind, ActionMode> = { commit: 'ask', push: 'ask', pr: 'ask', merge: 'ask', delete: 'ask', send: 'ask', publish: 'ask', pay: 'ask' }
+// What puts something in front of other people, spends money or can't be undone: after the agent
+// has read something from outside in a turn (an email, a page, an issue), these may be what that
+// text asked for, so with the guard on they ask first even when a rule lets them run.
+export const OUTBOUND: readonly ActionKind[] = ['send', 'publish', 'pay', 'delete', 'browser', 'apps']
 
-export const actionLabel = (k: ActionKind): string =>
+export const kindLabel = (k: ActionKind): string =>
   ({
     commit: L('Fazer commit', 'Commit'),
     push: L('Subir commits (push)', 'Push commits'),
@@ -27,19 +31,23 @@ export const actionLabel = (k: ActionKind): string =>
     delete: L('Apagar', 'Delete'),
     send: L('Enviar mensagem', 'Send a message'),
     publish: L('Publicar ou colocar no ar', 'Publish or deploy'),
-    pay: L('Pagar ou transferir', 'Pay or transfer')
+    pay: L('Pagar ou transferir', 'Pay or transfer'),
+    browser: L('Clique arriscado no navegador', 'A risky click in the browser'),
+    apps: L('Ação arriscada nos apps', 'A risky action in an app')
   })[k]
 
 export const actionHint = (k: ActionKind): string =>
   ({
     commit: 'git commit',
     push: 'git push',
-    pr: L('gh pr create, abrir_pr, criar PR num conector', 'gh pr create, abrir_pr, creating a PR in a connector'),
+    pr: L('gh pr create, criar PR num conector', 'gh pr create, creating a PR in a connector'),
     merge: L('git merge, gh pr merge, merge num conector', 'git merge, gh pr merge, merging in a connector'),
     delete: L('rm -r, apagar branch, git reset --hard, apagar num conector', 'rm -r, deleting a branch, git reset --hard, deleting in a connector'),
     send: L('e-mail, Slack, comentário: num conector', 'email, Slack, a comment: in a connector'),
     publish: L('npm publish, deploy, release', 'npm publish, deploy, release'),
-    pay: L('pagamento, transferência, reembolso: num conector', 'payment, transfer, refund: in a connector')
+    pay: L('pagamento, transferência, reembolso: num conector', 'payment, transfer, refund: in a connector'),
+    browser: L('enviar, comprar, confirmar, um botão sem nome: no navegador do agente', 'send, buy, confirm, a button with no name: in the agent’s browser'),
+    apps: L('enviar, apagar, confirmar: nos apps do computador', 'send, delete, confirm: in the computer’s apps')
   })[k]
 
 // What the agent does, in its own words for the approval card: "quer fazer commit".
@@ -52,7 +60,9 @@ export const actionVerb = (k: ActionKind): string =>
     delete: L('apagar', 'delete'),
     send: L('enviar uma mensagem', 'send a message'),
     publish: L('publicar', 'publish'),
-    pay: L('pagar', 'pay')
+    pay: L('pagar', 'pay'),
+    browser: L('clicar no navegador', 'click in the browser'),
+    apps: L('agir num app', 'act in an app')
   })[k]
 
 export const modeLabel = (m: ActionMode): string => ({ ask: L('Pede aprovação', 'Asks first'), auto: L('Faz sozinho', 'Does it alone'), off: L('Nunca', 'Never') })[m]
@@ -68,27 +78,99 @@ export function cleanRules(value: unknown): ActionRules {
   return out
 }
 
-// The agent's own rule wins; then the one in Settings; then the default.
-export const actionMode = (kind: ActionKind, agentRules?: ActionRules, globalRules?: ActionRules): ActionMode => agentRules?.[kind] ?? globalRules?.[kind] ?? DEFAULT_ACTION_MODE[kind]
+// ---------- levels ----------
 
-const STRICTNESS: readonly ActionMode[] = ['auto', 'ask', 'off']
-const stricter = (a: ActionMode, b: ActionMode): ActionMode => (STRICTNESS.indexOf(b) > STRICTNESS.indexOf(a) ? b : a)
+// careful: asks before anything that changes something. normal: asks before what's sensitive
+// (sending, deleting, paying…), as Tucano always has. free: does everything on its own.
+export type Autonomy = 'careful' | 'normal' | 'free'
+export const AUTONOMY_LEVELS: readonly Autonomy[] = ['careful', 'normal', 'free']
+export const isAutonomy = (v: unknown): v is Autonomy => typeof v === 'string' && (AUTONOMY_LEVELS as readonly string[]).includes(v)
+
+export const autonomyLabel = (a: Autonomy): string => ({ careful: L('Cuidadoso', 'Careful'), normal: L('Normal', 'Normal'), free: L('Sem travas', 'No guardrails') })[a]
+export const autonomyHint = (a: Autonomy): string =>
+  ({
+    careful: L('Pede aprovação antes de qualquer coisa que mude algo: escrever num conector, commit, push, um clique arriscado.', 'Asks before anything that changes something: writing in a connector, a commit, a push, a risky click.'),
+    normal: L('Lê e escreve sozinho; pede antes do que é sensível: enviar, apagar, publicar, pagar, um clique arriscado.', 'Reads and writes on its own; asks before what’s sensitive: sending, deleting, publishing, paying, a risky click.'),
+    free: L('Faz tudo sozinho, sem pedir. O que você marcou como alto risco ainda pede.', 'Does everything on its own, without asking. What you marked high risk still asks.')
+  })[a]
+
+// What a level says about a kind; undefined: the tool's class decides (sensitive asks), as before levels.
+export const levelMode = (level: Autonomy): ActionMode | undefined => (level === 'careful' ? 'ask' : level === 'free' ? 'auto' : undefined)
+
+// Who decides, most specific first: the agent's rule for that kind; its own level (careful or free);
+// the rule in Settings; the level in Settings. An agent left on "Padrão" follows Settings.
+export interface Policy {
+  agentRules?: ActionRules
+  agentLevel?: Autonomy
+  globalRules?: ActionRules
+  globalLevel?: Autonomy
+  guard?: boolean // the outside-content guard (OUTBOUND); off only when the person turned it off
+  above?: readonly Policy[] // on a task another agent handed out, the agents above it: the strictest rule of the chain counts
+}
+
+export const policyOf = (agent: { actionRules?: ActionRules; autonomy?: Autonomy; outsideGuard?: boolean } | undefined, settings: { actionRules?: ActionRules; autonomy?: Autonomy; outsideGuard?: boolean }): Policy => ({
+  agentRules: agent?.actionRules,
+  agentLevel: agent?.autonomy,
+  globalRules: settings.actionRules,
+  globalLevel: settings.autonomy,
+  guard: agent?.outsideGuard ?? settings.outsideGuard ?? true
+})
+
+const ownLevel = (p: Policy): Autonomy => p.agentLevel ?? p.globalLevel ?? 'normal'
+
+// On a delegated task an agent can't get done, by handing it down, what its own level holds back.
+const LEVEL_STRICTNESS: readonly Autonomy[] = ['free', 'normal', 'careful']
+export const levelOf = (p: Policy): Autonomy => (p.above ?? []).reduce<Autonomy>((l, up) => (LEVEL_STRICTNESS.indexOf(ownLevel(up)) > LEVEL_STRICTNESS.indexOf(l) ? ownLevel(up) : l), ownLevel(p))
+
+function ownMode(kind: ActionKind, p: Policy): ActionMode | undefined {
+  const own = p.agentRules?.[kind]
+  if (own) return own
+  if (p.agentLevel && p.agentLevel !== 'normal') return levelMode(p.agentLevel)
+  return p.globalRules?.[kind] ?? (p.agentLevel ? undefined : levelMode(p.globalLevel ?? 'normal'))
+}
+
+// undefined (the tool's class decides) sits between "does it alone" and "asks".
+const MODE_STRICTNESS: readonly (ActionMode | undefined)[] = ['auto', undefined, 'ask', 'off']
+const stricter = (a: ActionMode | undefined, b: ActionMode | undefined): ActionMode | undefined => (MODE_STRICTNESS.indexOf(b) > MODE_STRICTNESS.indexOf(a) ? b : a)
 
 // On a task another agent handed out, the strictest rule of everyone in the chain counts: an agent
-// can't get done by delegating what its own rules hold back. `above`: the rules of the agents above.
-export const chainMode = (kind: ActionKind, agentRules?: ActionRules, globalRules?: ActionRules, above: readonly (ActionRules | undefined)[] = []): ActionMode =>
-  above.reduce<ActionMode>((m, r) => stricter(m, actionMode(kind, r, globalRules)), actionMode(kind, agentRules, globalRules))
+// can't get done by delegating what its own rules hold back.
+export const actionMode = (kind: ActionKind, p: Policy): ActionMode | undefined => (p.above ?? []).reduce((m, up) => stricter(m, ownMode(kind, up)), ownMode(kind, p))
 
-// One call may be several kinds at once (`git commit && git push`): any "never" stops it,
-// else any "ask" makes it wait; `kinds` are the ones that decided it. `above`: true when an
-// agent above in the chain made it stricter than the agent's own rule.
-export function gate(kinds: readonly ActionKind[], agentRules?: ActionRules, globalRules?: ActionRules, above: readonly (ActionRules | undefined)[] = []): { mode: ActionMode; kinds: ActionKind[]; above?: true } {
+// One call may be several kinds at once (`git commit && git push`): any "never" stops it, else any
+// "ask" makes it wait, else one no rule decides leaves it to the class; "auto" only when all say so.
+// `above`: true when an agent above in the chain made it stricter than the agent's own rule.
+export function gate(kinds: readonly ActionKind[], p: Policy): { mode?: ActionMode; kinds: ActionKind[]; above?: true } {
   const unique = [...new Set(kinds)]
   for (const mode of ['off', 'ask'] as const) {
-    const hit = unique.filter((k) => chainMode(k, agentRules, globalRules, above) === mode)
-    if (hit.length) return { mode, kinds: hit, ...(hit.some((k) => actionMode(k, agentRules, globalRules) !== mode) ? { above: true as const } : {}) }
+    const hit = unique.filter((k) => actionMode(k, p) === mode)
+    if (hit.length) return { mode, kinds: hit, ...(hit.some((k) => ownMode(k, p) !== mode) ? { above: true as const } : {}) }
   }
+  if (!unique.length || unique.some((k) => actionMode(k, p) === undefined)) return { kinds: unique.filter((k) => actionMode(k, p) === undefined) }
   return { mode: 'auto', kinds: unique }
+}
+
+// What happens to one call. `cls`: the tool's class (a command is a write); `alwaysAllowed`: approved
+// for good from a card; `outside`: the turn has read something from outside; `askByDefault`: what
+// no rule decides asks (a risky click), else it goes by the class.
+export type Verdict = { run: boolean; off?: boolean; why: 'read' | 'rule' | 'level' | 'class' | 'always' | 'risk' | 'guard' | 'never'; kinds: ActionKind[]; above?: true }
+
+export function verdict(o: { cls: 'read' | 'write' | 'sensitive'; kinds: readonly ActionKind[]; p: Policy; highRisk?: boolean; alwaysAllowed?: boolean; outside?: boolean; askByDefault?: boolean }): Verdict {
+  if (o.cls === 'read' && !o.askByDefault) return { run: true, why: 'read', kinds: [] }
+  const g = gate(o.kinds, o.p)
+  if (g.mode === 'off') return { run: false, off: true, why: 'never', kinds: g.kinds, ...(g.above ? { above: true as const } : {}) }
+  if (o.highRisk) return { run: false, why: 'risk', kinds: g.kinds }
+  if (g.mode === 'ask') return { run: false, why: 'rule', kinds: g.kinds }
+  const level = levelOf(o.p)
+  // Let through by a rule or by the level: unless what goes out came after something from outside.
+  const loose = (why: Verdict['why'], kinds: readonly ActionKind[], outbound: boolean): Verdict => (outbound && o.p.guard !== false && o.outside ? { run: false, why: 'guard', kinds: [...kinds] } : { run: true, why, kinds: [...kinds] })
+  if (g.mode === 'auto') return loose('rule', g.kinds, g.kinds.some((k) => OUTBOUND.includes(k)))
+  // No rule decides: the level, then the class.
+  if (level === 'careful') return { run: false, why: 'level', kinds: g.kinds }
+  if (level === 'free') return loose('level', g.kinds, o.cls === 'sensitive' || !!o.askByDefault || g.kinds.some((k) => OUTBOUND.includes(k)))
+  if (o.askByDefault) return { run: false, why: 'class', kinds: g.kinds }
+  if (o.cls === 'sensitive') return o.alwaysAllowed ? { run: true, why: 'always', kinds: g.kinds } : { run: false, why: 'class', kinds: g.kinds }
+  return { run: true, why: 'class', kinds: g.kinds }
 }
 
 // ---------- reading a connector tool ----------

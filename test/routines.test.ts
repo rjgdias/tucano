@@ -36,7 +36,7 @@ describe('schedule', () => {
 
 describe('routines', () => {
   const ready = { installed: true, loggedIn: true }
-  const settings: Settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, gemini: ready, cursor: ready, grok: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
+  const settings: Settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, antigravity: ready, cursor: ready, grok: ready, cline: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
   const agent = (id: string, handle: string, extra: Partial<Agent> = {}): Agent => ({
     id, name: handle[0]!.toUpperCase() + handle.slice(1), handle, role: '', color: 'sky', instructions: '', modelId: 'sonnet', effort: 'low', limit: 1_000_000, used: 0, grants: {}, memory: 'read', computer: false, archived: false, ...extra
   })
@@ -60,7 +60,7 @@ describe('routines', () => {
     clock = at(2026, 10, 19, 8, 0) // a Monday
     const base = fakeEngine('claude', { delayMs: 1 })
     const claude: Engine = { id: 'claude', run: (t) => (turns.push(t), base.run(t)) }
-    const engines: Record<EngineId, Engine> = { claude, codex: fakeEngine('codex', { delayMs: 1 }), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
+    const engines: Record<EngineId, Engine> = { claude, codex: fakeEngine('codex', { delayMs: 1 }), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), antigravity: fakeEngine('antigravity'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok'), cline: fakeEngine('cline') }
     const emit = (_: CoreEvent): void => {}
     gateway = new Gateway()
     await gateway.start()
@@ -187,6 +187,10 @@ describe('routines', () => {
     const base = { id: 'm', conversationId: 'c1', author: { kind: 'agent' as const, id: 'a1' }, at: 0 }
     expect(outcome({ ...base, text: '## Resumo\n\n**3 issues** vencidas: [ENG-1](https://x.y/1)', run: { status: 'done', steps: [] } })).toBe('Resumo 3 issues vencidas: ENG-1')
     expect(outcome({ ...base, text: '', run: { status: 'waiting_approval', steps: [] } })).toBe('Pediu aprovação pra continuar.')
+    expect(outcome({ ...base, text: '', run: { status: 'waiting_input', steps: [], question: 'Pra quando?' } })).toBe('Perguntou: Pra quando?')
+    expect(
+      outcome({ ...base, text: '', run: { status: 'waiting_input', steps: [], questions: [{ question: 'Paginação no menu?', kind: 'single', options: [{ label: 'a' }, { label: 'b' }] }, { question: 'Pra quando?', kind: 'text' }] } })
+    ).toBe('Perguntou: Paginação no menu? (+1)')
   })
 
   it('a one-off routine runs once and turns itself off', async () => {
@@ -282,7 +286,7 @@ describe('quiet hours', () => {
 // A reply that fails is tried again in place, up to twice, and then stays failed.
 describe('routine retries', () => {
   const ready = { installed: true, loggedIn: true }
-  const settings: Settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, gemini: ready, cursor: ready, grok: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
+  const settings: Settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, antigravity: ready, cursor: ready, grok: ready, cline: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
   const lia: Agent = { id: 'a1', name: 'Lia', handle: 'lia', role: '', color: 'sky', instructions: '', modelId: 'sonnet', effort: 'low', limit: 1_000_000, used: 0, grants: {}, memory: 'read', computer: false, archived: false }
 
   let db: Db
@@ -317,7 +321,7 @@ describe('routine retries', () => {
         else yield { type: 'done', text: doneText, usage: { inputTokens: 1, cacheReadTokens: 0, outputTokens: 1 } }
       }
     }
-    const engines: Record<EngineId, Engine> = { claude: flaky, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') }
+    const engines: Record<EngineId, Engine> = { claude: flaky, codex: fakeEngine('codex'), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), antigravity: fakeEngine('antigravity'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok'), cline: fakeEngine('cline') }
     gateway = new Gateway()
     await gateway.start()
     routines = new Routines({

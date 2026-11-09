@@ -80,7 +80,7 @@ const computers = {
 function runner(plan: (turn: Turn, tools: string[]) => Plan): Runner {
   return new Runner({
     db,
-    engines: { claude: scripted(plan, seen), codex: fakeEngine('codex', { delayMs: 1 }), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), gemini: fakeEngine('gemini'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok') },
+    engines: { claude: scripted(plan, seen), codex: fakeEngine('codex', { delayMs: 1 }), opencode: fakeEngine('opencode'), pi: fakeEngine('pi'), antigravity: fakeEngine('antigravity'), cursor: fakeEngine('cursor'), grok: fakeEngine('grok'), cline: fakeEngine('cline') },
     settings: async () => settings,
     emit: () => {},
     workDir: join(dir, 'work'),
@@ -112,7 +112,7 @@ beforeEach(async () => {
   db = new Db(join(dir, 'test.db'))
   seen = { turns: [], tools: [], results: [] }
   ran = []
-  settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, gemini: ready, cursor: ready, grok: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt' }
+  settings = { workspaceName: 'Edu', context: '', engines: { claude: ready, codex: ready, opencode: ready, pi: ready, antigravity: ready, cursor: ready, grok: ready, cline: ready }, routerModel: 'haiku', memoryModel: 'haiku', memoryLearning: 'approve', defaultLimit: 1000, approvalTtlHours: 24, theme: 'system', language: 'pt', autonomy: 'careful' } // careful: every kind asks unless a rule says otherwise
   gateway = new Gateway()
   await gateway.start()
   connectors = new ConnectorManager({ db, secrets: new Secrets(db, plainCipher), emit: () => {}, openUrl: () => {}, oauthCallbackUrl: () => gateway.url('/oauth/callback') })
@@ -128,7 +128,7 @@ afterEach(async () => {
 })
 
 describe('commands on the computer', () => {
-  it('a commit asks first by default: it becomes a pending approval and nothing runs', async () => {
+  it('on careful, a commit asks first: it becomes a pending approval and nothing runs', async () => {
     const r = runner(runs('git add -A && git commit -m "primeira versão"'))
     await r.send('d1', 'faça o commit')
     await r.idle()
@@ -291,11 +291,90 @@ describe('connector tools', () => {
     expect(tasks().map((t) => t.id)).toEqual([1, 2, 3])
   })
 
-  it('by default a delete still asks, as before', async () => {
+  it('on careful, a delete still asks', async () => {
     const r = runner(deletes)
     await r.send('d1', 'apaga a tarefa 2')
     await r.idle()
     expect(db.approvals()[0]).toMatchObject({ state: 'pending', tool: 'delete_task' })
+  })
+})
+
+describe('levels', () => {
+  const deletes = (turn: Turn): Plan => (turn.prompt.includes('apaga') && !turn.prompt.includes('aprovou') ? { tool: 'tarefas__delete_task', args: { id: 2 } } : null)
+  // Reads the list on "lista", deletes on "apaga": two replies, the first reading something from outside.
+  const readsThenDeletes = (turn: Turn): Plan => (turn.prompt.includes('aprovou') ? null : turn.prompt.includes('apaga') ? { tool: 'tarefas__delete_task', args: { id: 2 } } : turn.prompt.includes('lista') ? { tool: 'tarefas__list_tasks', args: {} } : null)
+
+  it('normal (nothing set) is how Tucano always worked: a commit runs, a sensitive delete asks', async () => {
+    settings = { ...settings, autonomy: undefined }
+    const r = runner(runs('git commit -m "x"'))
+    await r.send('d1', 'salva')
+    await r.idle()
+    expect(ran).toEqual(['git commit -m "x"'])
+    const d = runner(deletes)
+    await d.send('d1', 'apaga a tarefa 2')
+    await d.idle()
+    expect(db.approvals()[0]).toMatchObject({ state: 'pending', tool: 'delete_task' })
+    expect(tasks().map((t) => t.id)).toEqual([1, 2, 3])
+  })
+
+  it("no guardrails runs a sensitive delete without asking, and the step says it was the level", async () => {
+    db.saveAgent({ ...agent(), autonomy: 'free' })
+    const r = runner(deletes)
+    await r.send('d1', 'apaga a tarefa 2')
+    await r.idle()
+    expect(db.approvals()).toEqual([])
+    expect(tasks().map((t) => t.id)).toEqual([1, 3])
+    expect(agentMessages()[0]!.run!.steps.map((s) => s.label)).toContain('Executou (sem pedir: autonomia)')
+  })
+
+  it("an agent's own level wins over Settings, and its own rule over its level", async () => {
+    settings = { ...settings, autonomy: 'free' }
+    db.saveAgent({ ...agent({ delete: 'ask' }), autonomy: 'free' })
+    const r = runner(deletes)
+    await r.send('d1', 'apaga a tarefa 2')
+    await r.idle()
+    expect(db.approvals()[0]).toMatchObject({ state: 'pending', tool: 'delete_task' })
+  })
+
+  it('after reading something from outside, the guard makes even no guardrails ask before deleting', async () => {
+    db.saveAgent({ ...agent(), autonomy: 'free' })
+    const r = runner(readsThenDeletes)
+    await r.send('d1', 'lista as tarefas')
+    await r.idle()
+    expect(agentMessages()[0]!.run!.outside).toBe(true)
+    await r.send('d1', 'apaga a tarefa 2')
+    await r.idle()
+    const ap = db.approvals()[0]
+    expect(ap).toMatchObject({ state: 'pending', tool: 'delete_task' })
+    expect(textOf(seen.results[1])).toContain('leu algo de fora')
+    expect(tasks().map((t) => t.id)).toEqual([1, 2, 3])
+  })
+
+  it('with the guard off, no guardrails deletes after reading too', async () => {
+    db.saveAgent({ ...agent(), autonomy: 'free', outsideGuard: false })
+    const r = runner(readsThenDeletes)
+    await r.send('d1', 'lista as tarefas')
+    await r.idle()
+    await r.send('d1', 'apaga a tarefa 2')
+    await r.idle()
+    expect(db.approvals()).toEqual([])
+    expect(tasks().map((t) => t.id)).toEqual([1, 3])
+  })
+
+  it('a tool marked high risk asks even with no guardrails and the guard off', async () => {
+    db.saveAgent({ ...agent(), autonomy: 'free', outsideGuard: false })
+    db.updateTool(connectorId, 'delete_task', { highRisk: true })
+    const r = runner(deletes)
+    await r.send('d1', 'apaga a tarefa 2')
+    await r.idle()
+    expect(db.approvals()[0]).toMatchObject({ state: 'pending', tool: 'delete_task', highRisk: true })
+  })
+
+  it('careful asks before a write a connector does on its own, like creating a task', async () => {
+    const r = runner((turn) => (turn.prompt.includes('cria') && !turn.prompt.includes('aprovou') ? { tool: 'tarefas__create_task', args: { title: 'nova' } } : null))
+    await r.send('d1', 'cria uma tarefa')
+    await r.idle()
+    expect(db.approvals()[0]).toMatchObject({ state: 'pending', tool: 'create_task' })
   })
 })
 
