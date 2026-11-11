@@ -121,7 +121,6 @@ function scoped(kind: TeamItemKind, fields: Fields, refs: Refs): Fields {
     out['grants'] = Object.fromEntries(Object.entries(out['grants'] as Fields).filter(([name]) => refs.connectors.has(name)))
   if (kind === 'channel' && Array.isArray(out['members'])) out['members'] = (out['members'] as string[]).filter((h) => refs.handles.has(h))
   if (kind === 'skill' && Array.isArray(out['agents'])) out['agents'] = (out['agents'] as string[]).filter((h) => refs.handles.has(h))
-  if (kind === 'agent' && Array.isArray(out['team'])) out['team'] = (out['team'] as string[]).filter((h) => refs.handles.has(h))
   return out
 }
 
@@ -175,7 +174,7 @@ export function teamMarkdown(team: Team): string {
       return [
         `### ${f(it, 'name')} (@${f(it, 'handle')})`,
         '',
-        [f(it, 'role'), modelInfo(f(it, 'model'))?.label ?? f(it, 'model'), it.fields['computer'] ? L('com computador', 'with a computer') : '', grants.length ? `${L('acessa', 'uses')} ${grants.join(', ')}` : '', ((it.fields['team'] as string[] | undefined) ?? []).length ? `${L('coordena', 'coordinates')} ${(it.fields['team'] as string[]).map((h) => `@${h}`).join(', ')}` : ''].filter(Boolean).join(' · '),
+        [f(it, 'role'), modelInfo(f(it, 'model'))?.label ?? f(it, 'model'), it.fields['computer'] ? L('com computador', 'with a computer') : '', grants.length ? `${L('acessa', 'uses')} ${grants.join(', ')}` : ''].filter(Boolean).join(' · '),
         '',
         ...quote(f(it, 'instructions')),
         ''
@@ -270,7 +269,6 @@ function localItems(db: Db, context: string, by = db.ownerId()): Local[] {
         wiki: a.wiki,
         computer: a.computer,
         grants: Object.fromEntries(Object.entries(a.grants).flatMap(([id, g]) => (g !== 'none' && connectorName(id) ? [[connectorName(id)!, g]] : [])).sort(([x], [y]) => x!.localeCompare(y!))),
-        team: a.team?.length ? sorted(a.team.flatMap((id) => handle(id) ?? [])) : undefined, // who it coordinates
         instructions: a.instructions
       }
     })
@@ -424,7 +422,7 @@ export class TeamFiles {
     const changes = this.diff(f, team)
     const theirsOf = new Map(team.items.map((it) => [keyOf(it), it]))
     const base = new Map(f.base.map((b) => [keyOf(b), b]))
-    const done = { added: 0, updated: 0, removed: 0, skipped: [] as string[], connectors: [] as string[], teams: [] as { agentId: string; handles: string[] }[] }
+    const done = { added: 0, updated: 0, removed: 0, skipped: [] as string[], connectors: [] as string[] }
     let left = 0
     for (const ch of changes) {
       const choice = choices[ch.key] ?? 'later'
@@ -457,10 +455,6 @@ export class TeamFiles {
       if (Object.keys(patch).length) this.update(it.kind, f.links[ch.key]!, patch, done)
       done.updated++
       base.set(ch.key, it)
-    }
-    for (const t of done.teams) {
-      const a = this.deps.db.agent(t.agentId)
-      if (a) this.deps.db.saveAgent({ ...a, team: t.handles.flatMap((h) => this.ids().agent(h) ?? []) })
     }
     // Items without changes follow the file too: their base moves to its version.
     for (const it of team.items) if (f.links[keyOf(it)] && !changes.some((c) => c.key === keyOf(it))) base.set(keyOf(it), it)
@@ -541,7 +535,7 @@ export class TeamFiles {
     return { kind: 'poll', connectorId, tool: str(t.tool), args: t.args ?? {}, everyMinutes: t.everyMinutes || 5, ...(keep ? { seen: prev.seen, checkedAt: prev.checkedAt } : {}) }
   }
 
-  private create(it: Item, done: { skipped: string[]; connectors: string[]; teams: { agentId: string; handles: string[] }[] }): string | undefined {
+  private create(it: Item, done: { skipped: string[]; connectors: string[] }): string | undefined {
     const { db } = this.deps
     const f = it.fields
     const id = randomUUID()
@@ -577,7 +571,6 @@ export class TeamFiles {
           archived: false
         }
         db.saveAgent(cleanLook(agent))
-        if (Array.isArray(f['team'])) done.teams.push({ agentId: id, handles: f['team'] as string[] })
         return id
       }
       case 'channel':
@@ -607,7 +600,7 @@ export class TeamFiles {
     }
   }
 
-  private update(kind: TeamItemKind, localId: string, patch: Fields, done: { skipped: string[]; connectors: string[]; teams: { agentId: string; handles: string[] }[] }): void {
+  private update(kind: TeamItemKind, localId: string, patch: Fields, done: { skipped: string[]; connectors: string[] }): void {
     const { db } = this.deps
     const has = (k: string): boolean => k in patch
     const handles = this.ids()
@@ -649,7 +642,6 @@ export class TeamFiles {
         if (has('browser')) next.browser = patch['browser'] === true ? true : undefined
         if (has('wiki')) next.wiki = (str(patch['wiki']) || undefined) as WikiAccess | undefined
         if (has('grants')) next.grants = this.grants(patch['grants'], done.skipped, next.handle)
-        if (has('team')) done.teams.push({ agentId: a.id, handles: (patch['team'] as string[] | undefined) ?? [] })
         db.saveAgent(cleanLook(next))
         return
       }

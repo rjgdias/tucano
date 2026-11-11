@@ -15,7 +15,7 @@ import { L, langOf, locale, setLang, type Lang } from '../shared/lang'
 import { errorFor } from '../shared/errors'
 import type { Api, CoreEvent, Method, Params, Request, Wire } from '../shared/rpc'
 import { limitError, paramsError } from '../shared/rpc-shapes'
-import { ACCOUNT_ENGINES, applyOrder, proposalsOf, type Proposal, type ProposalsResult, channelName, ENGINES, inQuietHours, modelInfo, personScope, rememberModels, requestRunning, scopePerson, usable, WEBHOOK_PORT, type Account, type AccountEngine, type Agent, type BrowserReply, type Conversation, type Message, type EngineId, type EngineStatus, type Person, type Routine, type Settings, type WikiChange, type WikiSource } from '../shared/types'
+import { ACCOUNT_ENGINES, applyOrder, proposalsOf, type Proposal, type ProposalsResult, channelName, ENGINES, inQuietHours, modelInfo, personScope, rememberModels, scopePerson, usable, WEBHOOK_PORT, type Account, type AccountEngine, type Agent, type BrowserReply, type Conversation, type Message, type EngineId, type EngineStatus, type Person, type Routine, type Settings, type WikiChange, type WikiSource } from '../shared/types'
 import { agentOwner, channelEditError, cleanName, dmOwner, Hub, MAX_NAME, mayEditChannel, nameLongError, nameTakenError, People, routineDetail, stripInvisible, type Purged } from './people'
 import { adminError, admit, admitComputer, can, isAdmin, must } from './policy-people'
 import { cleanRules, isAutonomy } from '../shared/actions'
@@ -1607,8 +1607,6 @@ const api: Handlers = {
     if (!c) return
     reach(ctx, id)
     if (c.kind === 'channel') must(ctx.person, { kind: 'admin' })
-    if (c.kind === 'agents' && requestRunning(c, db.messages()))
-      throw new Error(L('Esse pedido ainda está em andamento. Dá pra apagar a conversa quando ele terminar.', "That request is still going. The conversation can be deleted once it's over."))
     record(ctx, c.kind === 'channel' ? 'channel.deleted' : 'dm.deleted', id, c.kind === 'channel' ? { name: c.name } : undefined)
     dropConversation(id)
   },

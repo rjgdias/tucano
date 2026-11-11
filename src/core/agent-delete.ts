@@ -8,7 +8,7 @@ import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { L } from '../shared/lang'
 import type { CoreEvent } from '../shared/rpc'
-import { requestRunning, type Agent, type RunStatus } from '../shared/types'
+import type { Agent, RunStatus } from '../shared/types'
 import type { Db } from './db'
 
 const BUSY: RunStatus[] = ['working', 'waiting_input', 'waiting_approval']
@@ -63,11 +63,6 @@ export function deleteAgent(id: string, deps: AgentDeleteDeps): Promise<void> {
   const agent = db.agent(id)
   if (!agent || agent.kind === 'removed') return Promise.resolve()
   if (agent.kind === 'tuca') throw new Error(L('O Tuca faz parte do app e não pode ser excluído.', 'Tuca is part of the app and can’t be deleted.'))
-  // Another agent is waiting on that conversation, as when deleting one directly.
-  const messages = db.messages()
-  if (db.conversations().some((c) => c.kind === 'agents' && c.members.includes(id) && requestRunning(c, messages))) {
-    throw new Error(L(`${agent.name} está num pedido em andamento com outro agente. Dá pra excluir quando ele terminar.`, `${agent.name} is in a request still going with another agent. It can be deleted once that's over.`))
-  }
 
   // Its routines post as the routine, so their replies are found through them.
   const routines = db.routines().filter((r) => r.agentId === id)
@@ -83,16 +78,10 @@ export function deleteAgent(id: string, deps: AgentDeleteDeps): Promise<void> {
     }
   }
   deps.forgetSessions(id)
-  for (const c of db.conversations()) if (c.kind !== 'channel' && (c.name === id || c.members.includes(id))) deps.deleteConversation(c.id)
+  for (const c of db.conversations()) if (c.kind === 'dm' && (c.name === id || c.members.includes(id))) deps.deleteConversation(c.id)
   const channels = db.setAgentChannels(id, [])
   deps.forgetMemories(id)
   deps.forgetSkills(id)
-  // Off the teams it was on, or their counts would keep it.
-  for (const a of db.agents()) {
-    if (!a.team?.includes(id)) continue
-    db.saveAgent({ ...a, team: a.team.filter((x) => x !== id) })
-    emit({ type: 'agent', agent: db.agent(a.id)! })
-  }
 
   // Lent folders are only forgotten: they are the person's, and nothing in them is touched.
   db.setFolders(id, [])

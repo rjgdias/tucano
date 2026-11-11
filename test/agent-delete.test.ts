@@ -181,24 +181,6 @@ describe('deleting an agent', () => {
     expect(erased).toHaveLength(1)
   })
 
-  it('a DM between it and another agent goes too, and it leaves the teams it was on', async () => {
-    db.createConversation({ id: 'pair', kind: 'agents', name: 'leo-iris', members: ['a1', 'a2'] })
-    db.saveAgent(agent('a2', 'iris', { team: ['a1', 'a3'] }))
-    await deleteAgent('a1', deps)
-    expect(db.conversation('pair')).toBeUndefined()
-    expect(db.agent('a2')!.team).toEqual(['a3'])
-    expect(db.agent('a1')!.team ?? []).toEqual([])
-  })
-
-  it("won't delete an agent in a request still going with another agent, and changes nothing trying", () => {
-    db.createConversation({ id: 'pair', kind: 'agents', name: 'leo-iris', members: ['a1', 'a2'] })
-    db.saveMessage(running('asking', 'pair', { kind: 'agent', id: 'a2' }))
-    expect(() => deleteAgent('a1', deps)).toThrow('em andamento')
-    expect(db.agent('a1')!.kind).toBeUndefined()
-    expect(db.conversation('pair')).toBeDefined()
-    expect(stopped).toEqual([])
-  })
-
   it('a reply still queued or retried does not start once the agent is gone', async () => {
     const turns: unknown[] = []
     const base = fakeEngine('claude', { delayMs: 1 })

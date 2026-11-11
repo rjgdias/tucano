@@ -161,21 +161,6 @@ describe("the team's .md file", () => {
     expect(a.db.agent('s')!.effort).toBe('medium')
   })
 
-  it('carries who each agent coordinates, by handle, and offers a change to it', () => {
-    const a = author()
-    a.db.saveAgent({ ...a.db.agent('p')!, team: ['s'] })
-    const md = a.teams.export()
-    expect(md).toContain('coordena @staff')
-    const b = app()
-    importAll(b, md)
-    expect(byHandle(b.db, 'pm').team).toEqual([byHandle(b.db, 'staff').id])
-    a.db.saveAgent({ ...a.db.agent('p')!, team: [] })
-    const u = b.teams.preview(a.teams.export())
-    expect(u.changes).toMatchObject([{ title: 'Pm (@pm)', status: 'update', fields: [{ name: 'team', mine: ['staff'] }] }])
-    b.teams.apply(a.teams.export(), all(u))
-    expect(byHandle(b.db, 'pm').team).toEqual([])
-  })
-
   it('links what already exists by handle, so the file comes as an update instead of a duplicate', () => {
     const md = author().teams.export()
     const b = app()

@@ -30,7 +30,6 @@ export interface TeamFile {
     web: boolean
     computer: boolean
     grants: Record<string, GrantLevel> // by connector name
-    team?: string[] // the agents it coordinates, by handle
   }[]
   skills: { name: string; description: string; body: string; agents: string[] }[] // agents by handle
   channels: { name: string; topic?: string; members: string[] }[]

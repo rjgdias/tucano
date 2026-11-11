@@ -11,7 +11,6 @@ import type { ToolDef } from './gateway'
 import { describeQuestions, questionsOf } from '../shared/questions'
 import { osOf, shellCommand, systemName } from './platform'
 import { kindLabel, levelOf, policyOf, type ActionKind, type Autonomy } from '../shared/actions'
-import { delegatedWhere, teamSection, togetherSection } from './delegation'
 
 export const HISTORY_LIMIT = 30
 
@@ -37,10 +36,6 @@ export type PromptOpts = {
   skills?: Skill[] // the active ones it follows, when it has skill tools
   builder?: string // the Tuca's view of the workspace: models, connectors, the team (live)
   builderGuide?: string // how to propose agents, teams, routines and channels, and the Tuca's guide (stable)
-  team?: { team: Agent[]; others: Agent[] } // who it can hand work to with delegar: the ones it coordinates, and the rest
-  delegatedBy?: Agent // the agent whose task this reply works on
-  askedIn?: string // that task is a question it asked in this channel, and this agent was picked to answer
-  together?: { before: Agent[]; after: Agent[] } // called with others at once: who answered before it, who answers after
   wiki?: { pages: number; kinds: string[] } // the wiki it may read
   connectors?: boolean // it has connector tools (Slack, Databricks…)
   people?: Person[] // the Tucano's people; with more than one, the agent is told who they are
@@ -64,17 +59,10 @@ export interface GitHubAccess {
 // session (Claude Code keeps the first system prompt on resume), so whatever changes on its own
 // goes in liveContext instead.
 export function systemPrompt(opts: PromptOpts): string {
-  const { agent, settings, conversation, peers, canRemember, hasComputer, computerOff, computerSetup, macFolder, web, browser, apps, routines, skills, connectors, builderGuide, people, jobs, team, delegatedBy, askedIn, together } = opts
+  const { agent, settings, conversation, peers, canRemember, hasComputer, computerOff, computerSetup, macFolder, web, browser, apps, routines, skills, connectors, builderGuide, people, jobs } = opts
   const me = settings.workspaceName || L('o usuário', 'the user')
-  const other = conversation.kind === 'agents' ? peers[0] : undefined
-  const where = delegatedBy
-    ? delegatedWhere(me, delegatedBy, askedIn)
-    : conversation.kind === 'agents'
-      ? L(
-          `Você está numa DM com ${other ? `${other.name} (@${other.handle}), outro agente` : 'outro agente'}, onde vocês trabalham juntos. ${me} pode ler e escrever aqui.`,
-          `You're in a DM with ${other ? `${other.name} (@${other.handle}), another agent` : 'another agent'}, where you work together. ${me} can read and write here.`
-        )
-      : conversation.kind === 'dm'
+  const where =
+    conversation.kind === 'dm'
       ? L(`Você está numa conversa direta (DM) com ${me}.`, `You're in a direct conversation (DM) with ${me}.`)
       : `${L(`Você está no canal #${conversation.name}.`, `You're in the #${conversation.name} channel.`)}${peers.length ? ` ${L('Outros agentes aqui', 'Other agents here')}: ${peers.map((p) => `${p.name} (@${p.handle}${p.role ? `, ${p.role}` : ''})`).join('; ')}.` : ''}`
 
@@ -140,8 +128,6 @@ export function systemPrompt(opts: PromptOpts): string {
     browser && browserSection(me),
     apps?.length && appsSection(me, apps),
     builderGuide,
-    team && teamSection(me, team.team, team.others, delegatedBy ? 'task' : conversation.kind === 'dm' ? 'dm' : 'open'),
-    together && togetherSection(me, together.before, together.after),
     jobs === 'on' &&
       L(
         `## Jobs do Databricks\nQuando ${me} falar de um job ou run (acompanhar, dizer sobre ele, ver como está, checar, analisar), sua primeira ação é chamar acompanhar_job, com o id, o nome ou o link, mesmo que o run já tenha terminado: é isso que mostra o cartão na conversa e traz os dados na hora. Nunca rode a CLI do Databricks no seu computador para isso, nem instale nada. Para detalhes, use ver_job depois.`,
@@ -541,8 +527,7 @@ export function transcriptBlocks(opts: TranscriptOpts): { blocks: string[]; bloc
       .join('\n\n')
 
   const shown = messages.filter((m) => m.author.kind !== 'system' && body(m))
-  const pair = conversation.kind === 'agents' ? conversation.members.map((id) => agents.find((a) => a.id === id)?.name ?? L('agente', 'agent')).join(L(' e ', ' and ')) : ''
-  const where = conversation.kind === 'dm' ? L(`DM com ${me}`, `DM with ${me}`) : conversation.kind === 'agents' ? L(`DM entre ${pair}`, `DM between ${pair}`) : `#${conversation.name}`
+  const where = conversation.kind === 'dm' ? L(`DM com ${me}`, `DM with ${me}`) : `#${conversation.name}`
   // Who started the thread this reply is in.
   const starter = thread?.author
   const starterName = starter?.kind === 'agent' ? agents.find((a) => a.id === starter.id)?.name : undefined

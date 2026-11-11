@@ -17,7 +17,6 @@ import {
   pendingApprovals,
   pendingMemories,
   shortcut,
-  toast,
   updateSettings,
   useStore,
   amAdmin,
@@ -34,7 +33,7 @@ import {
   type View,
   getState
 } from '../store'
-import { requestRunning, type Conversation } from '../../../shared/types'
+import { type Conversation } from '../../../shared/types'
 import type { SidebarPart } from '../../../shared/onboarding'
 import { addGroup, arrange, moveChannel, nudgeChannel, removeGroup, renameGroup, type ChannelLayout } from '../../../shared/channel-layout'
 import { call } from '../rpc'
@@ -167,8 +166,6 @@ export function Sidebar(): ReactNode {
   const agentOf = (id: string): Agent | undefined => agents.find((a) => a.id === id)
   const channels = conversations.filter((c) => c.kind === 'channel')
   const dms = conversations.filter((c) => c.kind === 'dm' && agentOf(c.name)?.kind !== 'tuca')
-  // DMs between agents: where they work together, which you can read and answer in. One per request, newest first.
-  const pairs = conversations.filter((c) => c.kind === 'agents').reverse()
   const [menu, setMenu] = useState<MenuState>(null)
   const closeMenu = useCallback(() => setMenu(null), [])
   const open = (e: React.MouseEvent, items: MenuItem[]): void => {
@@ -280,31 +277,6 @@ export function Sidebar(): ReactNode {
         }).then((ok) => {
           if (ok) void deleteConversation(id)
         })
-    }
-  ]
-  // A DM between agents holds one request's work: once that's over, it can go.
-  const pairMenu = (c: Conversation): MenuItem[] => [
-    ...(c.unread ? [{ label: L('Marcar como lido', 'Mark as read'), icon: 'check' as const, onClick: () => markRead(c.id) }] : []),
-    { label: L('Configurações da conversa…', 'Conversation settings…'), icon: 'gear', onClick: () => openDialog({ kind: 'settings', id: c.id }) },
-    'separator',
-    {
-      label: L('Apagar a conversa…', 'Delete the conversation…'),
-      icon: 'trash',
-      danger: true,
-      onClick: () => {
-        if (requestRunning(c, Object.values(getState().messages).flat())) return toast(L('Esse pedido ainda está em andamento. Dá pra apagar a conversa quando ele terminar.', "That request is still going. The conversation can be deleted once it's over."))
-        void confirmDialog({
-          title: L('Apagar esta conversa entre agentes?', 'Delete this conversation between agents?'),
-          body: L(
-            'As mensagens dela vão junto. O retorno que o líder já te deu continua na sua conversa, e os agentes continuam no time. Não dá pra desfazer.',
-            "Its messages go too. The report the lead already gave you stays in your conversation, and the agents stay on the team. This can't be undone."
-          ),
-          confirm: L('Apagar a conversa', 'Delete the conversation'),
-          danger: true
-        }).then((ok) => {
-          if (ok) deleteConversation(c.id).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)))
-        })
-      }
     }
   ]
   const agentMenu = (agentId: string, agentName: string): MenuItem[] => [
@@ -446,16 +418,6 @@ export function Sidebar(): ReactNode {
         </Section>
         )}
 
-        {pairs.length > 0 && (
-        <Section id="pairs" label={L('Entre agentes', 'Between agents')} unread={unreadIn(pairs)}>
-          {pairs.map((c) => (
-            <div key={c.id} onContextMenu={(e) => open(e, pairMenu(c))}>
-              <PairItem id={c.id} members={c.members} topic={c.topic} unread={c.unread} />
-            </div>
-          ))}
-        </Section>
-        )}
-
         <Section
           id="agents"
           label={L('Agentes', 'Agents')}
@@ -539,25 +501,6 @@ const DmItem = memo(function DmItem({ id, agent, unread, owner }: { id: string; 
     </button>
   )
 })
-
-function PairItem({ id, members, topic, unread }: { id: string; members: string[]; topic?: string; unread?: number }): ReactNode {
-  const agents = useStore((s) => members.map((m) => agentById(s, m)).filter((a): a is Agent => !!a))
-  const active = useStore((s) => s.view?.kind === 'conversation' && s.view.id === id)
-  const working = useStore((s) => (s.messages[id] ?? []).some((m) => m.run?.status === 'working'))
-  return (
-    <button className={`nav-item nav-item--pair ${active ? 'is-active' : ''} ${unread ? 'is-unread' : ''}`} title={topic} onClick={() => navigate({ kind: 'conversation', id })}>
-      <span className="pair-avatars">
-        {agents.map((a) => (
-          <AgentAvatar key={a.id} agent={a} size={14} busy={working} />
-        ))}
-      </span>
-      <span className="nav-item__label">{agents.map((a) => a.name).join(' ↔ ')}</span>
-      {topic && <span className="nav-item__meta nav-item__role">{topic}</span>}
-      {working && <span className="pulse" title={L('Trabalhando', 'Working')} />}
-      {unread ? <span className="badge badge--soft">{unread}</span> : null}
-    </button>
-  )
-}
 
 // `owner`: with a team, whose agent it is (its approvals go to them), when it isn't mine.
 const AgentItem = memo(function AgentItem({ id, owner }: { id: string; owner?: string }): ReactNode {

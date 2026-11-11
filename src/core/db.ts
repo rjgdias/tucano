@@ -313,8 +313,8 @@ export const MIGRATIONS = [
     SELECT id, COALESCE(json_extract(run, '$.status'), 'message') FROM messages;
   CREATE INDEX IF NOT EXISTS message_notifications_unread ON message_notifications (message_id) WHERE unread = 1;
   `,
-  // Agents that coordinate others, and DMs between agents. These three keep the slots a test build's
-  // database already counted, ahead of main's people.
+  // These three keep the slots a test build's database already counted, ahead of main's people. The first two
+  // came with agents that coordinate others (a PR since closed): nothing reads their columns now.
   `
   ALTER TABLE agents ADD COLUMN team TEXT NOT NULL DEFAULT '[]';
   ALTER TABLE conversations ADD COLUMN pair INTEGER NOT NULL DEFAULT 0;
@@ -784,7 +784,6 @@ export class Db {
       ...(isAutonomy(r['autonomy']) ? { autonomy: r['autonomy'] } : {}),
       ...(r['outside_guard'] === 0 || r['outside_guard'] === 1 ? { outsideGuard: r['outside_guard'] === 1 } : {}),
       folders: JSON.parse(str(r['folders']) || '[]') as LentFolder[],
-      team: JSON.parse(str(r['team']) || '[]') as string[],
       archived: r['archived'] === 1,
       ...(str(r['kind']) === 'tuca' ? { kind: 'tuca' as const } : str(r['kind']) === 'removed' ? { kind: 'removed' as const } : {}),
       // One with no owner (put there by another tool, after the people came) is the Tucano owner's.
@@ -804,14 +803,14 @@ export class Db {
   saveAgent(a: Agent): void {
     this.db
       .prepare(
-        `INSERT INTO agents (id, name, handle, role, color, instructions, model, fallback_model, fallback_account, account, effort, limit_tokens, max_routines, grants, memory_mode, computer, computer_kind, web, browser, job_watch, apps, auto_approve, action_rules, autonomy, outside_guard, ssh, archived, kind, custom_color, picture, avatar, wiki, team, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO agents (id, name, handle, role, color, instructions, model, fallback_model, fallback_account, account, effort, limit_tokens, max_routines, grants, memory_mode, computer, computer_kind, web, browser, job_watch, apps, auto_approve, action_rules, autonomy, outside_guard, ssh, archived, kind, custom_color, picture, avatar, wiki, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET name = excluded.name, handle = excluded.handle, role = excluded.role,
            color = excluded.color, instructions = excluded.instructions, model = excluded.model, fallback_model = excluded.fallback_model, fallback_account = excluded.fallback_account, account = excluded.account, effort = excluded.effort,
            limit_tokens = excluded.limit_tokens, max_routines = excluded.max_routines, grants = excluded.grants, memory_mode = excluded.memory_mode,
-           computer = excluded.computer, computer_kind = excluded.computer_kind, web = excluded.web, browser = excluded.browser, job_watch = excluded.job_watch, apps = excluded.apps, auto_approve = excluded.auto_approve, action_rules = excluded.action_rules, autonomy = excluded.autonomy, outside_guard = excluded.outside_guard, ssh = excluded.ssh, archived = excluded.archived, kind = COALESCE(excluded.kind, agents.kind), custom_color = excluded.custom_color, picture = excluded.picture, avatar = excluded.avatar, wiki = excluded.wiki, team = excluded.team`
+           computer = excluded.computer, computer_kind = excluded.computer_kind, web = excluded.web, browser = excluded.browser, job_watch = excluded.job_watch, apps = excluded.apps, auto_approve = excluded.auto_approve, action_rules = excluded.action_rules, autonomy = excluded.autonomy, outside_guard = excluded.outside_guard, ssh = excluded.ssh, archived = excluded.archived, kind = COALESCE(excluded.kind, agents.kind), custom_color = excluded.custom_color, picture = excluded.picture, avatar = excluded.avatar, wiki = excluded.wiki`
       )
-      .run(a.id, a.name, a.handle, a.role, a.color, a.instructions, a.modelId, a.fallbackModelId || null, a.fallbackAccountId || null, a.accountId || null, a.effort, a.limit, routineCap(a.maxRoutines), JSON.stringify(a.grants), a.memory ?? 'auto', a.computer ? 1 : 0, a.computerKind === 'mac' ? 'mac' : 'linux', a.web === false ? 0 : 1, a.browser ? 1 : 0, a.jobWatch ? 1 : 0, JSON.stringify(a.apps ?? []), JSON.stringify(a.autoApprove ?? []), JSON.stringify(cleanRules(a.actionRules)), isAutonomy(a.autonomy) ? a.autonomy : null, a.outsideGuard === undefined ? null : a.outsideGuard ? 1 : 0, a.ssh ? 1 : 0, a.archived ? 1 : 0, a.kind ?? null, a.customColor ?? null, a.picture ?? null, a.avatar ? JSON.stringify(a.avatar) : null, a.wiki ?? null, JSON.stringify((a.team ?? []).filter((id) => id !== a.id)), Date.now())
+      .run(a.id, a.name, a.handle, a.role, a.color, a.instructions, a.modelId, a.fallbackModelId || null, a.fallbackAccountId || null, a.accountId || null, a.effort, a.limit, routineCap(a.maxRoutines), JSON.stringify(a.grants), a.memory ?? 'auto', a.computer ? 1 : 0, a.computerKind === 'mac' ? 'mac' : 'linux', a.web === false ? 0 : 1, a.browser ? 1 : 0, a.jobWatch ? 1 : 0, JSON.stringify(a.apps ?? []), JSON.stringify(a.autoApprove ?? []), JSON.stringify(cleanRules(a.actionRules)), isAutonomy(a.autonomy) ? a.autonomy : null, a.outsideGuard === undefined ? null : a.outsideGuard ? 1 : 0, a.ssh ? 1 : 0, a.archived ? 1 : 0, a.kind ?? null, a.customColor ?? null, a.picture ?? null, a.avatar ? JSON.stringify(a.avatar) : null, a.wiki ?? null, Date.now())
     // An agent made without one belongs to the Tucano's owner; a save that doesn't say keeps it.
     this.db.prepare('UPDATE agents SET owner = COALESCE(?, owner, (SELECT id FROM people WHERE role = ?)) WHERE id = ?').run(a.owner ?? null, 'owner', a.id)
   }
@@ -819,15 +818,6 @@ export class Db {
   // Kept apart from saveAgent: folders change only after the core checks them.
   setFolders(agentId: string, folders: LentFolder[]): void {
     this.db.prepare('UPDATE agents SET folders = ? WHERE id = ?').run(JSON.stringify(folders), agentId)
-  }
-
-  // What one request has spent so far, in counted tokens: the message that started it and every reply that
-  // belongs to it (delegated work, follow-ups, reports), whoever wrote them.
-  requestSpent(root: string): number {
-    const r = this.db
-      .prepare(`SELECT COALESCE(ROUND(SUM(${COUNTED})), 0) AS used FROM receipts WHERE message_id = ? OR message_id IN (SELECT id FROM messages WHERE json_extract(run, '$.root') = ?)`)
-      .get(root, root) as { used: number }
-    return r.used
   }
 
   usedThisMonth(agentId: string): number {
@@ -856,8 +846,7 @@ export class Db {
   private toConversation(r: Row, members: string[]): Conversation {
     return {
       id: str(r['id']),
-      // A DM between two agents is kept as a channel row (the kind's CHECK predates it), marked as a pair.
-      kind: r['pair'] === 1 ? 'agents' : (str(r['kind']) as Conversation['kind']),
+      kind: str(r['kind']) as Conversation['kind'],
       name: str(r['name']),
       topic: r['topic'] ? str(r['topic']) : undefined,
       members,
@@ -866,7 +855,6 @@ export class Db {
       summaryAt: r['summary_at'] ? Number(r['summary_at']) : undefined,
       ...(r['wiki_capture'] === 0 ? { wikiCapture: false } : {}),
       ...(r['threads'] === 1 ? { threads: true } : {}),
-      ...(r['request'] ? { request: str(r['request']) } : {}),
       ...(r['owner'] ? { owner: str(r['owner']) } : {}),
       ...(r['created_by'] ? { createdBy: str(r['created_by']) } : {}),
       unread: Number(r['unread'])
@@ -910,7 +898,7 @@ export class Db {
       const owner = c.kind === 'dm' ? (c.owner ?? this.ownerId()) : null
       // A channel is whoever made it (the owner when the code doesn't say).
       const by = c.kind === 'channel' ? (c.createdBy ?? this.ownerId()) : null
-      this.db.prepare('INSERT INTO conversations (id, kind, name, topic, threads, owner, created_by, pair, request, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(c.id, c.kind === 'agents' ? 'channel' : c.kind, c.name, c.topic ?? null, c.threads ? 1 : null, owner, by, c.kind === 'agents' ? 1 : 0, c.request ?? null, Date.now())
+      this.db.prepare('INSERT INTO conversations (id, kind, name, topic, threads, owner, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(c.id, c.kind, c.name, c.topic ?? null, c.threads ? 1 : null, owner, by, Date.now())
       for (const m of c.members) this.db.prepare('INSERT INTO members (conversation_id, agent_id) VALUES (?, ?)').run(c.id, m)
     })
   }
