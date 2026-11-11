@@ -743,6 +743,7 @@ export interface Connector {
   auth: ConnectorAuth
   status: ConnectorStatus
   error?: string
+  errorDetail?: string // the raw error and its causes (a certificate's code, the DNS's), under "Ver detalhes"
   tools: ConnectorTool[]
 }
 
@@ -887,6 +888,15 @@ export interface ImageUpload {
 export const IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024 // what the models take per image
 export const MAX_IMAGES_PER_MESSAGE = 10
+
+// A file I attach to a message that isn't an image (a PDF, a Word doc, a spreadsheet, text): kept with
+// the message, and what it says goes to the agents as text (any engine, with a computer or not).
+export interface FileUpload {
+  name: string
+  data: string // base64
+}
+export const MAX_FILE_BYTES = 20 * 1024 * 1024 // as the wiki takes
+export const MAX_FILES_PER_MESSAGE = 5
 
 // In a browser (Tucano as a server) the server itself serves them, under /artifact.
 export const artifactUrl = (a: Pick<Artifact, 'id' | 'name'>): string =>
@@ -1307,3 +1317,20 @@ export interface TeamUpdate {
 // Per change: take the file's ('package'; on a conflict, its side too), keep mine on the
 // conflicting fields ('mine'; on a removal, keep it and stop following it), or leave it for later.
 export type TeamChoice = 'package' | 'mine' | 'later'
+
+// A whole Tucano in one .zip (Settings › General › Export everything), and what a server finds in
+// one before restoring it (src/core/restore.ts).
+export interface BackupSummary {
+  version: 1
+  madeAt: number
+  app: string
+  workspace: string
+  schema: number
+  agents: number
+  channels: number
+  messages: number
+  memories: number
+  wikiPages: number
+  files: number
+  filesLeftOut: number // the agents' files that didn't fit in one upload
+}

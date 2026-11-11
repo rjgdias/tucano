@@ -51,6 +51,7 @@ import {
   type UsageReport,
   type Trigger,
   type ImageUpload,
+  type FileUpload,
   type Os,
   type LocalInfo,
   type VoiceModelId,
@@ -58,7 +59,8 @@ import {
   type TeamChoice,
   type TeamPackageInfo,
   type TeamUpdate,
-  type ProposalsResult
+  type ProposalsResult,
+  type BackupSummary
 } from '../../shared/types'
 import { call, connect, disconnect } from './rpc'
 
@@ -919,8 +921,8 @@ export const deleteConversation = (id: string): Promise<void> => call('deleteCon
 export const markRead = (id: string): void => { void call('markRead', { conversationId: id }) }
 
 // `threadId`: a reply in the thread that message started.
-export const sendMessage = (conversationId: string, text: string, images: ImageUpload[] = [], threadId?: string): void => {
-  if (text.trim() || images.length) void fire(L('Não consegui enviar a mensagem.', "I couldn't send the message."), 'sendMessage', { conversationId, text, ...(images.length ? { images } : {}), ...(threadId ? { threadId } : {}) })
+export const sendMessage = (conversationId: string, text: string, images: ImageUpload[] = [], threadId?: string, files: FileUpload[] = []): void => {
+  if (text.trim() || images.length || files.length) void fire(L('Não consegui enviar a mensagem.', "I couldn't send the message."), 'sendMessage', { conversationId, text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}), ...(threadId ? { threadId } : {}) })
 }
 
 export const answerDecision = (messageId: string, index: number, answer: Answer | null): void =>
@@ -1031,6 +1033,11 @@ export const previewTeam = (text: string): Promise<TeamUpdate> => call('previewT
 export const importTeam = (text: string, choices: Record<string, TeamChoice>): Promise<string> => call('importTeam', { text, choices })
 export const teams = (): Promise<TeamPackageInfo[]> => call('teams')
 export const forgetTeam = (id: string): Promise<void> => call('forgetTeam', { id })
+export const exportBackup = (): Promise<{ path: string } & BackupSummary> => call('exportBackup')
+export const restoreCheck = (path: string): Promise<BackupSummary> => call('restoreCheck', { path })
+export const restoreApply = (): Promise<void> => call('restoreApply')
+export const restoreCancel = (): Promise<void> => call('restoreCancel')
+export const restoreInfo = (): Promise<{ at: number; routines: number } | null> => call('restoreInfo')
 export const importAgents = (p: { path?: string; data?: string }): Promise<string> => call('importAgents', p)
 export const backupNow = (): Promise<string> => call('backupNow')
 export const openBackups = (): void => void fire(L('Não consegui abrir a pasta de backups.', "I couldn't open the backups folder."), 'openBackups')
