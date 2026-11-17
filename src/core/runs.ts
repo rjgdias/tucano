@@ -579,10 +579,14 @@ export class Runner {
     // The agent is still on my last message here: this one is almost always more of the same (a detail, a
     // correction). It goes in that reply's thread and waits, instead of starting a reply of its own.
     const solo = db.people().length < 2 // with a team, each person's message gets its own answer
-    const line = !solo || asked || this.paused ? undefined : this.lineFor(conv, body, thread)
+    // A request's thread (src/core/delegations.ts) has its own way: what I write there goes to whoever is
+    // doing it, and the request waits for that reply before going back. The queue would hand it over only
+    // after the reply under way, which closed the request without it.
+    const inRequest = !!thread && !!db.delegationAt(thread)
+    const line = !solo || asked || this.paused || inRequest ? undefined : this.lineFor(conv, body, thread)
     // The router is still picking who answers my last message here: this one waits for its pick, then
     // goes in that agent's line (or, if no one or several were picked, gets an answer of its own).
-    const hold = !solo || line || asked || this.paused || mentioned(body, this.members(conv)).length ? undefined : this.holds.get(`${conv.id}:${thread ?? ''}`)
+    const hold = !solo || line || asked || this.paused || inRequest || mentioned(body, this.members(conv)).length ? undefined : this.holds.get(`${conv.id}:${thread ?? ''}`)
     if (hold) {
       const waiting: Message = { id: randomUUID(), conversationId, author: { kind: 'person', id: writer.id }, text: body, at: Date.now(), ...(thread ? { threadId: thread } : {}) }
       for (const img of pictures) this.keepImage(waiting, img)
