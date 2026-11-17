@@ -7,7 +7,7 @@ import type { TeamChange, TeamChoice, TeamItemKind, TeamPackageInfo, TeamUpdate 
 import { amAdmin, forgetTeam, importTeam, teams, useStore } from '../store'
 import { confirmDialog } from './Dialogs'
 import { Modal } from './Modal'
-import { Diff } from './Skills'
+import { Diff } from './skills/SkillDiff'
 
 const message = (e: unknown): string => (e instanceof Error ? e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : String(e))
 
