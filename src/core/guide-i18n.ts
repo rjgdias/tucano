@@ -7,6 +7,10 @@
 // still show in Portuguese, so test/guide-i18n.test.ts fails on a slug that exists in one and not the
 // other, in either direction.
 export const GUIDE_EN: Record<string, { title: string; summary: string }> = {
+  jobs: {
+    title: 'Databricks jobs',
+    summary: 'An agent follows a run through the Databricks CLI, with a live card, and only spends tokens when something matters.'
+  },
   agentes: {
     title: 'Agents',
     summary: 'Creating an agent, instructions, model, limits, tools and access, memory, appearance and archiving.'
