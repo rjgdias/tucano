@@ -8,7 +8,7 @@ import { channelName, codexValue, ENGINES, MAX_AGENT_ROUTINES, MODELS, routineCa
 import type { ToolDef } from './gateway'
 import { guideIndex } from './guide'
 import { SCREENS } from '../shared/screens'
-import { bossOf, loops, MAX_LINE, overLine, rankOf } from '../shared/org'
+import { bossOf, loops } from '../shared/org'
 
 const COLORS: AgentColor[] = ['sky', 'indigo', 'violet', 'rose', 'amber', 'green', 'teal', 'graphite']
 
@@ -54,7 +54,8 @@ export function withoutBoss(t: ToolDef): ToolDef {
 }
 
 // `responde_a`: the agent `id` will answer to ('' for no one), by @handle or name, checked against the
-// org chart's rules (src/shared/org.ts). `id` may be one not made yet ('' for a new agent).
+// org chart's rules (src/shared/org.ts). `id` may be one not made yet ('' for a new agent). An entry point
+// (Agent.entry) answers to no agent, and only the person chose it, so it isn't given a boss here.
 export function bossArg(raw: unknown, agents: Agent[], id: string): { id?: string; error?: string } {
   const h = String(raw ?? '').trim().replace(/^@/, '')
   if (!h || NOBODY.test(h)) return { id: '' }
@@ -62,12 +63,13 @@ export function bossArg(raw: unknown, agents: Agent[], id: string): { id?: strin
   const boss = agents.find((a) => a.handle.toLowerCase() === key) ?? agents.find((a) => a.name.toLowerCase() === key)
   if (!boss || boss.archived || boss.kind === 'tuca') return { error: L(`Não existe o agente "${h}" pra ser o chefe. Use um @handle da lista do time, ou "ninguém".`, `There's no agent "${h}" to answer to. Use a @handle from the team list, or "ninguém".`) }
   if (id && loops(agents, id, boss.id)) return { error: L(`${boss.name} está abaixo dele (ou é ele mesmo): isso fecharia um ciclo.`, `${boss.name} is below it (or is itself): that would close a loop.`) }
-  if (overLine(agents, id, boss.id)) return { error: L(`A linha passaria de ${MAX_LINE} agentes do topo até a base. Ponha-o sob alguém mais acima.`, `The line would go past ${MAX_LINE} agents from top to bottom. Put it under someone higher up.`) }
+  const me = id ? agents.find((a) => a.id === id) : undefined
+  if (me?.entry) return { error: L(`${me.name} é um ponto de entrada, escolhido pela pessoa: não responde a nenhum agente. Pra mudar isso, ela tira na página dele.`, `${me.name} is an entry point, chosen by the person: it answers to no agent. To change that, they turn it off on its page.`) }
   return { id: boss.id }
 }
 
 // A team's card: each `reportsToName` (another agent of the same card) must exist there, and the whole
-// tree, with the agents that exist, must close no loop and keep every line within MAX_LINE.
+// tree, with the agents that exist, must close no loop.
 function teamTreeError(agents: Agent[], drafts: AgentDraft[]): string | undefined {
   const key = (n: string): string => n.trim().replace(/^@/, '').toLowerCase()
   const ids = drafts.map((_, i) => `new:${i}`)
@@ -85,22 +87,26 @@ function teamTreeError(agents: Agent[], drafts: AgentDraft[]): string | undefine
       if (seen.has(up)) return L(`${d.name} entraria num ciclo de quem responde a quem.`, `${d.name} would be in a loop of who answers to whom.`)
       seen.add(up)
     }
-    if (rankOf(nodes, ids[i]!) > MAX_LINE) return L(`A linha de ${d.name} passaria de ${MAX_LINE} agentes do topo até a base.`, `${d.name}'s line would go past ${MAX_LINE} agents from top to bottom.`)
   }
   return undefined
 }
 
-// The org chart as an agent that organizes it reads it: who answers to whom, and who answers to no one.
+// The org chart as an agent that organizes it reads it: who answers to whom, who answers to no one,
+// and the entry points the person chose (src/shared/org.ts).
 export function orgLines(agents: Agent[]): string {
   const live = agents.filter((a) => !a.archived && a.kind !== 'tuca')
-  return live.map((a) => `- ${a.name} (@${a.handle}${a.role ? `, ${a.role}` : ''}) → ${bossOf(live, a) ? L(`responde a @${bossOf(live, a)!.handle}`, `answers to @${bossOf(live, a)!.handle}`) : L('responde só à pessoa', 'answers to the person only')}${a.manager ? L(' · organiza o time', ' · organizes the team') : ''}`).join('\n')
+  const boss = (a: Agent): string => {
+    const b = bossOf(live, a)
+    return b ? L(`responde a @${b.handle}`, `answers to @${b.handle}`) : L('responde só à pessoa', 'answers to the person only')
+  }
+  return live.map((a) => `- ${a.name} (@${a.handle}${a.role ? `, ${a.role}` : ''}) → ${boss(a)}${a.entry && !bossOf(live, a) ? L(' · ponto de entrada', ' · entry point') : ''}${a.manager ? L(' · organiza o time', ' · organizes the team') : ''}`).join('\n')
 }
 
 // How an agent that organizes the team (or the Tuca) proposes the org chart. Stable: the chart itself is in builderSection.
 export function organizerGuide(me: string): string {
   return L(
-    `## O organograma\nVocê pode propor a quem cada agente responde, num card que ${me} aplica: propor_ajuste com responde_a (o @handle do novo chefe, ou "ninguém" pra ele responder só a ${me}); ao criar, responde_a em propor_agente e em cada agente de propor_time (aí também vale o nome de outro agente do mesmo time). Quem está acima passa trabalho a quem está abaixo e recebe a resposta de volta; quem responde ao mesmo chefe pode pedir trabalho um ao outro. Uma linha tem no máximo ${MAX_LINE} agentes do topo até a base, e ninguém responde a quem está abaixo dele. Pra reorganizar vários de uma vez, mande um propor_ajuste por agente: ${me} aplica um por um ou todos. Explique em motivo o porquê de cada mudança.`,
-    `## The org chart\nYou can propose whom each agent answers to, as a card ${me} applies: propor_ajuste with responde_a (the new boss's @handle, or "ninguém" for it to answer to ${me} only); when creating, responde_a in propor_agente and in each agent of propor_time (there the name of another agent of the same team works too). Whoever is above hands work to those below and gets the answer back; those answering to the same boss can ask each other for work. A line holds at most ${MAX_LINE} agents from top to bottom, and no one answers to someone below it. To reorganize several at once, send one propor_ajuste per agent: ${me} applies them one by one or all together. Say why in motivo for each change.`
+    `## O organograma\nVocê pode propor a quem cada agente responde, num card que ${me} aplica: propor_ajuste com responde_a (o @handle do novo chefe, ou "ninguém" pra ele responder só a ${me}); ao criar, responde_a em propor_agente e em cada agente de propor_time (aí também vale o nome de outro agente do mesmo time). Quem está acima passa trabalho a quem está abaixo e recebe a resposta de volta; quem responde ao mesmo chefe pode pedir trabalho um ao outro. Cada árvore é um setor, com quem está no topo como chefe; sob um ponto de entrada, cada time abaixo dele é um setor, e a outro setor só os chefes pedem. Ninguém responde a quem está abaixo dele, e um ponto de entrada não responde a nenhum agente (só ${me} muda isso). Pra reorganizar vários de uma vez, mande um propor_ajuste por agente: ${me} aplica um por um ou todos. Explique em motivo o porquê de cada mudança.`,
+    `## The org chart\nYou can propose whom each agent answers to, as a card ${me} applies: propor_ajuste with responde_a (the new boss's @handle, or "ninguém" for it to answer to ${me} only); when creating, responde_a in propor_agente and in each agent of propor_time (there the name of another agent of the same team works too). Whoever is above hands work to those below and gets the answer back; those answering to the same boss can ask each other for work. Each tree is a sector, headed by its top; under an entry point, each team below it is a sector, and only heads ask another sector. No one answers to someone below it, and an entry point answers to no agent (only ${me} changes that). To reorganize several at once, send one propor_ajuste per agent: ${me} applies them one by one or all together. Say why in motivo for each change.`
   )
 }
 const EFFORTS: Effort[] = ['low', 'medium', 'high']

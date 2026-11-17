@@ -1955,7 +1955,7 @@ ${note}`,
             usable: (id) => { const m = modelInfo(id); return !!m?.id && now.engines[m.engine].loggedIn },
             fallbackModel: (db.agent(agent.id) ?? agent).modelId,
             connectors: this.deps.connectors?.list() ?? [],
-            agents: db.agents().filter((a) => !a.archived && a.kind !== 'tuca'),
+            agents: agentsFor(requester, db.agents()).filter((a) => !a.archived && a.kind !== 'tuca'),
             organizes,
             me: settings.workspaceName
           })

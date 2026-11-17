@@ -11,6 +11,10 @@ export const GUIDE_EN: Record<string, { title: string; summary: string }> = {
     title: 'Databricks jobs',
     summary: 'An agent follows a run through the Databricks CLI, with a live card, and only spends tokens when something matters.'
   },
+  'organizar-time': {
+    title: 'An agent that organizes the team',
+    summary: 'Turning on Organizes the team for an agent to propose who answers to whom, with your yes; and the Tuca proposing the org chart when creating agents and teams.'
+  },
   agentes: {
     title: 'Agents',
     summary: 'Creating an agent, instructions, model, limits, tools and access, memory, appearance and archiving.'

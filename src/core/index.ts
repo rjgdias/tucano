@@ -1378,6 +1378,8 @@ function applyOne(ctx: Ctx, messageId: string, index: number, batch = false): { 
     const channelIds = db.conversations().filter((c) => c.kind === 'channel' && c.members.includes(agent.id)).map((c) => c.id)
     // A new boss is checked again: the chart may have changed since the card (saveAgent would drop it quietly).
     const boss = p.changes.reportsTo
+    // An entry point the person chose since: saveAgent would drop it for the boss, so the card says why instead.
+    if (boss && agent.entry) throw new Error(L(`${agent.name} virou um ponto de entrada desde a proposta: não responde a nenhum agente.`, `${agent.name} became an entry point since the proposal: it answers to no agent.`))
     if (boss && boss !== agent.reportsTo && !possibleBosses(db.agents(), agent.id).some((a) => a.id === boss))
       throw new Error(L(`${agent.name} não pode mais responder a ${db.agent(boss)?.name ?? 'esse agente'}: o organograma mudou desde a proposta.`, `${agent.name} can no longer answer to ${db.agent(boss)?.name ?? 'that agent'}: the org chart changed since the proposal.`))
     api.saveAgent({ agent: { ...agent, ...p.changes, ...(p.changes.reportsTo === '' ? { reportsTo: undefined } : {}) }, channelIds }, ctx)
