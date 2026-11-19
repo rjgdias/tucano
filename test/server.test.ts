@@ -1,9 +1,12 @@
 import { randomBytes } from 'node:crypto'
-import { createServer } from 'node:http'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import { Forwarder, isPrivate } from '../src/server/forward'
+import { clientIp, decodedPath, Doors, doorOf, Limiter, MAX_FAILS, PAGE_HEADERS, sameOrigin, WINDOW_MS } from '../src/server/guard'
 import { vault } from '../src/server/vault'
 
 describe('the server vault', () => {
@@ -34,17 +37,119 @@ describe('passing services through on a private address', () => {
   const lan = Object.values(networkInterfaces())
     .flat()
     .find((i) => i && i.family === 'IPv4' && !i.internal && isPrivate(i.address))?.address
+  // The port the system picks for loopback can already be taken on the private address: a runner's own
+  // outgoing connections leave from it. The forwarder drops a port it cannot take, so a test that sleeps
+  // and then asks is racing the machine. Wait for the page instead, and take another port when it stays shut.
+  const served = async (url: string, within: number): Promise<string | undefined> => {
+    const until = Date.now() + within
+    for (;;) {
+      try {
+        return await (await fetch(url)).text()
+      } catch (e) {
+        if (Date.now() > until) return undefined
+        await new Promise((r) => setTimeout(r, 25))
+      }
+    }
+  }
+  const refused = async (url: string, within: number): Promise<void> => {
+    const until = Date.now() + within
+    for (;;) {
+      try {
+        await (await fetch(url)).text()
+      } catch (e) {
+        return
+      }
+      if (Date.now() > until) throw new Error(`still answering at ${url}`)
+      await new Promise((r) => setTimeout(r, 25))
+    }
+  }
   it.skipIf(!lan)('serves a loopback page at the private address, then stops', async () => {
-    const page = createServer((_q, r) => void r.end('do serviço'))
-    await new Promise<void>((r) => page.listen(0, '127.0.0.1', r))
-    const p = (page.address() as AddressInfo).port
-    const f = new Forwarder(lan!)
-    f.set(new Set([p]))
-    await new Promise((r) => setTimeout(r, 100))
-    expect(await (await fetch(`http://${lan}:${p}/`)).text()).toBe('do serviço')
+    let picked: { page: Server; f: Forwarder; p: number } | undefined
+    for (let tries = 0; tries < 5 && !picked; tries++) {
+      const page = createServer((_q, r) => void r.end('do serviço'))
+      await new Promise<void>((r) => page.listen(0, '127.0.0.1', r))
+      const p = (page.address() as AddressInfo).port
+      const f = new Forwarder(lan!)
+      f.set(new Set([p]))
+      if ((await served(`http://${lan}:${p}/`, 3_000)) === 'do serviço') picked = { page, f, p }
+      else {
+        f.set(new Set())
+        await new Promise((r) => page.close(r))
+      }
+    }
+    if (!picked) throw new Error(`no port was free on both 127.0.0.1 and ${lan}`)
+    const { page, f, p } = picked
+    expect(await served(`http://${lan}:${p}/`, 3_000)).toBe('do serviço')
     f.set(new Set())
-    await new Promise((r) => setTimeout(r, 100))
-    await expect(fetch(`http://${lan}:${p}/`)).rejects.toThrow()
+    await refused(`http://${lan}:${p}/`, 5_000)
     await new Promise((r) => page.close(r))
+  }, 30_000)
+})
+
+describe('the server on the internet', () => {
+  const req = (headers: Record<string, string | string[]>, remoteAddress = '10.0.0.9') => ({ headers, socket: { remoteAddress } }) as never
+
+  it('slows a guesser to nothing, one address at a time, and forgets after the window', () => {
+    let now = 0
+    const l = new Limiter(() => now)
+    for (let i = 0; i < MAX_FAILS - 1; i++) l.fail('1.1.1.1')
+    expect(l.blocked('1.1.1.1')).toBe(false)
+    l.fail('1.1.1.1')
+    expect(l.blocked('1.1.1.1')).toBe(true)
+    // Someone else, from another address, still gets in.
+    expect(l.blocked('2.2.2.2')).toBe(false)
+    now += WINDOW_MS + 1
+    expect(l.blocked('1.1.1.1')).toBe(false)
+  })
+
+  // Someone at the same address (an office, a phone network) trying invite codes doesn't lock the
+  // owner or a person with a key out: invite codes are counted on their own door.
+  it('counts wrong invite codes apart from wrong tokens and keys', () => {
+    const d = new Doors()
+    for (let i = 0; i < MAX_FAILS; i++) d.fail('join', '1.1.1.1')
+    expect(d.blocked('join', '1.1.1.1')).toBe(true)
+    expect(d.blocked('signin', '1.1.1.1')).toBe(false)
+    for (let i = 0; i < MAX_FAILS; i++) d.fail('signin', '2.2.2.2')
+    expect(d.blocked('signin', '2.2.2.2')).toBe(true)
+    expect(d.blocked('join', '2.2.2.2')).toBe(false)
+  })
+
+  it('knows the invite door from the rest', () => {
+    expect(doorOf('/join', 'POST', false)).toBe('join')
+    expect(doorOf('/', 'GET', true)).toBe('join')
+    expect(doorOf('/index.html', 'GET', true)).toBe('join')
+    expect(doorOf('/', 'GET', false)).toBe('signin')
+    expect(doorOf('/rpc', 'POST', false)).toBe('signin')
+    expect(doorOf('/join', 'GET', false)).toBe('signin')
+  })
+
+  it('the server asks the door before refusing, and counts a wrong code on the invite door', () => {
+    const src = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'index.ts'), 'utf8')
+    expect(src).toMatch(/doorOf\(url\.pathname, req\.method, url\.searchParams\.has\('invite'\)\) === 'join'/)
+    expect(src).toMatch(/doors\.blocked\('join', ip\)/)
+    expect(src).toMatch(/void signIn\(\{ cookie: cookieToken\(req\), offered, ip, doors,/) // the sign-in door: see signIn (team-round2.test.ts)
+    expect(src).not.toMatch(/guesses\.blocked\(ip\)/)
+    expect(src).toMatch(/doors\.fail\('join', ip\)/)
+  })
+
+  it("takes the proxy's word for the address only when told to", () => {
+    const r = req({ 'x-forwarded-for': '6.6.6.6, 203.0.113.7' }, '127.0.0.1')
+    expect(clientIp(r, true)).toBe('203.0.113.7') // the one the proxy itself added
+    expect(clientIp(r, false)).toBe('127.0.0.1') // without a proxy, the header is the asker's own word
+    expect(clientIp(req({}, '127.0.0.1'), true)).toBe('127.0.0.1')
+  })
+
+  it("answers its own page, not a sibling subdomain's", () => {
+    expect(sameOrigin(req({ host: 'ana.pro.example', origin: 'https://ana.pro.example' }))).toBe(true)
+    expect(sameOrigin(req({ host: 'ana.pro.example', origin: 'https://bruno.pro.example' }))).toBe(false)
+    expect(sameOrigin(req({ host: 'ana.pro.example', origin: 'null' }))).toBe(false)
+    expect(sameOrigin(req({ host: 'ana.pro.example' }))).toBe(true) // a navigation, or a program
+  })
+
+  it("can't be framed by another site, and reads a broken path as nothing", () => {
+    expect(PAGE_HEADERS['x-frame-options']).toBe('DENY')
+    expect(PAGE_HEADERS['content-security-policy']).toContain("frame-ancestors 'none'")
+    expect(decodedPath('/a%20b.png')).toBe('/a b.png')
+    expect(decodedPath('/%E0%A4%A')).toBeUndefined()
   })
 })
