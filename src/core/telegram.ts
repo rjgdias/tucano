@@ -7,6 +7,8 @@ import { L } from '../shared/lang'
 import { offline, UserError } from '../shared/errors'
 import type { Approval, Message, TelegramInfo } from '../shared/types'
 import type { Secrets } from './secrets'
+import { questionsAsText, questionsOf } from '../shared/questions'
+import { COFRE } from '../shared/vault'
 
 const API = 'https://api.telegram.org'
 const TOKEN = 'telegram:token'
@@ -214,6 +216,11 @@ export class Telegram {
       return
     }
     const approve = action === 'ok' || action === 'sure'
+    // A key or a login asked for (pedir_chave) is pasted in the app's card, never typed into a chat.
+    if (approve && ap.connectorId === COFRE) {
+      await this.api('answerCallbackQuery', { callback_query_id: q.id, text: L('Cole a chave no card, no Tucano.', 'Paste the key in the card, in Tucano.') })
+      return
+    }
     await this.api('answerCallbackQuery', { callback_query_id: q.id, text: approve ? L('Aprovado', 'Approved') : L('Recusado', 'Refused') })
     await edit(`${approvalText(ap)}\n\n${approve ? L('✅ Aprovado pelo Telegram', '✅ Approved from Telegram') : L('❌ Recusado pelo Telegram', '❌ Refused from Telegram')}`)
     await this.deps.decide(ap.id, approve ? 'approved' : 'refused', approve ? undefined : L('Recusado pelo Telegram', 'Refused from Telegram'))
@@ -228,15 +235,25 @@ export class Telegram {
   // ---------- what goes to the phone ----------
 
   async approvalAsked(ap: Approval, agentName: string): Promise<void> {
+    if (ap.connectorId === COFRE) {
+      const what = typeof ap.args['nome'] === 'string' ? L(`a chave ${ap.args['nome']}`, `the ${ap.args['nome']} key`) : L(`o login de ${String(ap.args['site'] ?? '')}`, `the login for ${String(ap.args['site'] ?? '')}`)
+      await this.send(
+        `${L(`${agentName} pede ${what}`, `${agentName} asks for ${what}`)}${ap.why ? `\n\n${ap.why}` : ''}\n\n${L('Cole no card da conversa, no Tucano: aqui, não.', 'Paste it in the card in the conversation, in Tucano: not here.')}`,
+        { reply_markup: { inline_keyboard: [[{ text: L('Recusar', 'Refuse'), callback_data: `ap:${ap.id}:no` }]] } }
+      )
+      return
+    }
     await this.send(`${L(`${agentName} pede aprovação`, `${agentName} asks for approval`)}\n\n${approvalText(ap)}`, {
       reply_markup: { inline_keyboard: [[{ text: L('Aprovar', 'Approve'), callback_data: `ap:${ap.id}:ok` }, { text: L('Recusar', 'Refuse'), callback_data: `ap:${ap.id}:no` }]] }
     })
   }
 
   async questionAsked(msg: Message, agentName: string, where: string): Promise<void> {
-    if (!msg.run?.question) return
+    const questions = questionsOf(msg.run)
+    if (!questions.length) return
+    const text = questionsAsText(questions)
     const id = await this.send(
-      L(`${agentName} pergunta (${where}):\n\n${msg.run.question}\n\nResponda a esta mensagem.`, `${agentName} asks (${where}):\n\n${msg.run.question}\n\nReply to this message.`),
+      L(`${agentName} pergunta (${where}):\n\n${text}\n\nResponda a esta mensagem.`, `${agentName} asks (${where}):\n\n${text}\n\nReply to this message.`),
       { reply_markup: { force_reply: true, input_field_placeholder: L('Sua resposta', 'Your answer') } }
     )
     if (id) this.questions.set(id, { conversationId: msg.conversationId, ...(msg.threadId ? { threadId: msg.threadId } : {}) })

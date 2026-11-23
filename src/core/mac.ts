@@ -11,6 +11,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { L } from '../shared/lang'
+import { workspacePorts } from './ports'
 import type { CoreEvent } from '../shared/rpc'
 import type { Agent, Artifact, ComputerInfo, Service } from '../shared/types'
 import type { Db } from './db'
@@ -20,7 +21,7 @@ import { artifactKind, badName, edited, manyMatches, clipOutput, diedAtStart, em
 
 const MAX_FILE = 200_000
 const MAX_SHOW_BYTES = 50 * 1024 * 1024
-const RESERVED_PORTS = [47_717, 47_718] // the app's own webhook and git proxy
+const RESERVED_PORTS = Object.values(workspacePorts()) // this workspace's webhook and git proxy
 
 // What the agent is told about this computer: the system, and what is usually installed.
 const installed = (): string => ({ mac: 'Homebrew, Python, Node…', linux: 'apt, Python, Node…', windows: 'Python, Node, git…' })[osOf()]
@@ -257,7 +258,7 @@ export class MacComputer {
     return (this.deps.env ?? loginEnv)()
   }
 
-  private async startService(agent: Agent, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<ToolOutcome> {
+  private async startService(agent: Agent, args: Record<string, unknown>, cwd: string, signal?: AbortSignal, conversationId?: string, env?: Record<string, string>): Promise<ToolOutcome> {
     const name = typeof args['name'] === 'string' ? args['name'].trim() : ''
     const command = typeof args['command'] === 'string' ? args['command'].trim() : ''
     const port = Number(args['port'])
@@ -274,13 +275,13 @@ export class MacComputer {
     mkdirSync(dirname(this.pidFile(agent.id, name)), { recursive: true })
     const log = join(logs, `${name}.log`)
     const fd = openSync(log, 'w')
-    const sh = shellCommand(command, { ...(await this.env()), TERM: 'dumb' })
+    const sh = shellCommand(command, { ...(await this.env()), ...env, TERM: 'dumb' })
     const child = spawn(sh.file, sh.args, { cwd, env: sh.env, detached: !isWin, windowsHide: true, windowsVerbatimArguments: sh.verbatim, stdio: ['ignore', fd, fd] })
     closeSync(fd)
     child.unref()
     if (!child.pid) return { result: textResult(L('Não consegui iniciar o processo.', "I couldn't start the process."), true) }
     writeFileSync(this.pidFile(agent.id, name), String(child.pid))
-    this.deps.db.saveService(agent.id, { name, command, port, startedAt: Date.now() })
+    this.deps.db.saveService(agent.id, { name, command, port, startedAt: Date.now(), conversationId })
 
     let open = false
     for (let i = 0; i < 60 && !signal?.aborted && alive(child.pid); i++) {
@@ -373,7 +374,7 @@ export class MacComputer {
     return { result: { content: [{ type: 'image', data: png.toString('base64'), mimeType: 'image/png' }, { type: 'text', text: L(`Print de ${url}, mostrado no chat e salvo em ${saved}.`, `Screenshot of ${url}, shown in the chat and saved at ${saved}.`) }] }, artifact: kept }
   }
 
-  async call(agent: Agent, name: string, args: Record<string, unknown>, ctx: { conversationId: string; messageId: string; signal?: AbortSignal }): Promise<ToolOutcome> {
+  async call(agent: Agent, name: string, args: Record<string, unknown>, ctx: { conversationId: string; messageId: string; signal?: AbortSignal; env?: Record<string, string> }): Promise<ToolOutcome> {
     const cwd = this.cwd(agent)
     const path = (): string => macPath(String(args['path'] ?? ''), cwd)
     switch (name) {
@@ -381,7 +382,7 @@ export class MacComputer {
         const command = String(args['command'] ?? '').trim()
         if (!command) return { result: textResult(L('Faltou o comando.', 'Missing the command.'), true) }
         const t = Math.min(600, Math.max(1, Number(args['timeout_seconds']) || 120))
-        const r = await run(command, { cwd, env: await this.env(), timeoutSeconds: t, signal: ctx.signal })
+        const r = await run(command, { cwd, env: { ...(await this.env()), ...ctx.env }, timeoutSeconds: t, signal: ctx.signal })
         return { result: textResult(formatExec(r, t), r.code !== 0) }
       }
       case 'read_file':
@@ -404,7 +405,7 @@ export class MacComputer {
         return { result: r.isError ? r : textResult(edited(file, count)) }
       }
       case 'start_service':
-        return this.startService(agent, args, cwd, ctx.signal)
+        return this.startService(agent, args, cwd, ctx.signal, ctx.conversationId, ctx.env)
       case 'stop_service': {
         const svc = String(args['name'] ?? '')
         if (!this.deps.db.services(agent.id).some((s) => s.name === svc)) return { result: textResult(noService(svc), true) }

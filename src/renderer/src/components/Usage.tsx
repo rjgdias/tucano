@@ -1,9 +1,11 @@
 // Uso e limites: this month at a glance (by day, by agent, by model), the
-// Claude subscription's windows, and where each agent will end the month.
+// Claude and Codex subscriptions' windows, and where each agent will end the month.
 import { L, locale } from '../../../shared/lang'
+import { windowNow } from '../../../shared/quota-window'
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
-import { agentById, countedTokens, ENGINES, isTeam, loadUsage, modelInfo, navigate, useStore, type Agent, type EngineId, type EngineStatus, type UsageReport } from '../store'
+import { agentById, amAdmin, countedTokens, ENGINES, isTeam, loadUsage, messageById, modelInfo, navigate, receipts, useStore, type Agent, type EngineId, type EngineStatus, type UsageReport } from '../store'
 import { Sheet } from './Pages'
+import { AdminOnly } from './People'
 import { AgentAvatar, duration, Icon, tokens, usd } from './ui'
 
 const DAY = 86_400_000
@@ -27,6 +29,12 @@ const shortTime = (at: number): string => {
   return d.toDateString() === new Date().toDateString() ? hm : `${d.toLocaleDateString(locale(), { day: '2-digit', month: '2-digit' })} ${hm}`
 }
 
+// When a window that's over started over: the time today, the date before that.
+const resetAt = (at: number): string => {
+  const today = new Date(at).toDateString() === new Date().toDateString()
+  return today ? L(`zerou às ${shortTime(at)}`, `reset at ${shortTime(at)}`) : L(`zerou em ${shortTime(at)}`, `reset on ${shortTime(at)}`)
+}
+
 // The app's own turns go under one name; agents keep theirs.
 function whoOf(id: string, agents: Agent[]): { key: string; name: string; color: string } {
   const a = agents.find((x) => x.id === id)
@@ -39,7 +47,8 @@ const PAYS = (): Record<NonNullable<EngineStatus['route']>, string> => ({
   plan: L('na assinatura', 'on the subscription'),
   apikey: L('cobrado por token, na chave de API', 'billed per token, on the API key'),
   gateway: L('pelo gateway', 'through the gateway'),
-  providers: L('pelos provedores em que está logado', 'through the providers it’s signed in to')
+  providers: L('pelos provedores em que está logado', 'through the providers it’s signed in to'),
+  endpoint: L('cobrado por token, no seu endpoint', 'billed per token, on your endpoint')
 })
 
 function useBilling(u: UsageReport | null): { id: EngineId; label: string; status: EngineStatus }[] {
@@ -52,8 +61,10 @@ function useBilling(u: UsageReport | null): { id: EngineId; label: string; statu
 export function UsagePage(): ReactNode {
   const [u, setU] = useState<UsageReport | null>(null)
   // Recomputed whenever a reply lands with its receipt.
-  const receipts = useStore((s) => s.messages.reduce((n, m) => n + (m.run?.receipt ? 1 : 0), 0))
-  useEffect(() => void loadUsage().then(setU), [receipts])
+  const count = useStore((s) => receipts(s).length)
+  // What the team spends is the admins' (a member can still land here from the search).
+  const admin = useStore(amAdmin)
+  useEffect(() => void (admin && loadUsage().then(setU)), [count, admin])
   const billing = useBilling(u)
   const allPlan = billing.length > 0 && billing.every((b) => b.status.route === 'plan')
 
@@ -73,6 +84,12 @@ export function UsagePage(): ReactNode {
     </>
   )
 
+  if (!admin)
+    return (
+      <Sheet wide title={L('Uso e limites', 'Usage and limits')}>
+        <AdminOnly>{L('Só um admin vê o uso e os limites do Tucano.', 'Only an admin sees the Tucano’s usage and limits.')}</AdminOnly>
+      </Sheet>
+    )
   return (
     <Sheet wide title={L('Uso e limites', 'Usage and limits')} lede={subtitle}>
       {!u ? (
@@ -81,6 +98,7 @@ export function UsagePage(): ReactNode {
         <>
           <Month u={u} claude={billing.find((b) => b.id === 'claude')?.status} />
           {billing.find((b) => b.id === 'claude')?.status.route === 'plan' && <Quota />}
+          {billing.find((b) => b.id === 'codex')?.status.route === 'plan' && <CodexQuota />}
           <Agents u={u} />
           <div className="usage-grid">
             <Models u={u} />
@@ -225,7 +243,7 @@ function ApiCost({ usd: v, claude }: { usd: number; claude: EngineStatus }): Rea
 
 // ---------- the Claude subscription ----------
 
-// Its own windows, as the last reply reported them (the Codex CLI doesn't tell).
+// Its own windows, as the last reply reported them.
 function Quota(): ReactNode {
   const q = useStore((s) => s.settings.quota)
   if (!q || (!q.fiveHour && !q.sevenDay)) return null
@@ -233,7 +251,7 @@ function Quota(): ReactNode {
   return (
     <section className="read-group">
       <h2>
-        {L('Sua assinatura do Claude', 'Your Claude subscription')}<span>{L(`segundo o Claude Code às ${at} · o Codex não informa`, `per Claude Code at ${at} · Codex doesn't report it`)}</span>
+        {L('Sua assinatura do Claude', 'Your Claude subscription')}<span>{L(`segundo o Claude Code às ${at}`, `per Claude Code at ${at}`)}</span>
       </h2>
       <div className="usage-quota">
         {q.fiveHour && <Ring label={L('Janela de 5 horas', '5-hour window')} w={q.fiveHour} />}
@@ -243,8 +261,49 @@ function Quota(): ReactNode {
   )
 }
 
+// ---------- the Codex subscription ----------
+
+// Its windows, as Codex told when this page asked: how many and how long depends on the plan.
+function CodexQuota(): ReactNode {
+  const q = useStore((s) => s.settings.codexQuota)
+  if (!q?.windows.length) return null
+  const at = new Date(q.at).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })
+  const plan = q.plan ? ` ${cap(q.plan)}` : ''
+  return (
+    <section className="read-group">
+      <h2>
+        {L(`Sua assinatura do Codex${plan}`, `Your Codex${plan} subscription`)}<span>{L(`segundo o Codex às ${at}`, `per Codex at ${at}`)}</span>
+      </h2>
+      <div className="usage-quota">
+        {q.windows.map((w) => (
+          <Ring key={w.minutes} label={windowLabel(w.minutes)} w={w} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+const windowLabel = (minutes: number): string =>
+  minutes === 10_080
+    ? L('Semana', 'Week')
+    : minutes === 1440
+      ? L('Dia', 'Day')
+      : minutes % 1440 === 0
+      ? L(`Janela de ${minutes / 1440} dias`, `${minutes / 1440}-day window`)
+      : minutes % 60 === 0
+        ? L(`Janela de ${minutes / 60} horas`, `${minutes / 60}-hour window`)
+        : L(`Janela de ${minutes} min`, `${minutes}-minute window`)
+
 function Ring({ label, w }: { label: string; w: { utilization: number; resetsAt: number } }): ReactNode {
-  const pct = Math.min(1, Math.max(0, w.utilization))
+  // Draw again when the window resets, so a page left open doesn't keep the old window's share.
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const left = w.resetsAt - Date.now()
+    if (left <= 0 || left > 2 ** 31 - 1) return
+    const t = setTimeout(() => tick((n) => n + 1), left + 1000)
+    return () => clearTimeout(t)
+  }, [w.resetsAt])
+  const { used: pct, reset } = windowNow(w)
   const r = 22
   const c = 2 * Math.PI * r
   const tone = pct >= 0.9 ? 'is-danger' : pct >= 0.7 ? 'is-warn' : ''
@@ -257,7 +316,7 @@ function Ring({ label, w }: { label: string; w: { utilization: number; resetsAt:
       <div>
         <span className="muted small">{label}</span>
         <strong>{L(`${Math.round(pct * 100)}% usado`, `${Math.round(pct * 100)}% used`)}</strong>
-        <span className="muted small">{L('zera', 'resets')} {until(w.resetsAt)}</span>
+        <span className="muted small">{reset ? resetAt(w.resetsAt) : `${L('zera', 'resets')} ${until(w.resetsAt)}`}</span>
       </div>
     </div>
   )
@@ -286,16 +345,17 @@ function Agents({ u }: { u: UsageReport }): ReactNode {
 
 function AgentRow({ agent: a, stats, elapsed, daysInMonth, monthStart }: { agent: Agent; stats?: UsageReport['who'][number]; elapsed: number; daysInMonth: number; monthStart: number }): ReactNode {
   const model = modelInfo(a.modelId)
-  const pct = a.limit > 0 ? a.used / a.limit : 1
+  const unlimited = !(a.limit > 0)
+  const pct = unlimited ? 0 : a.used / a.limit
   // The pace only means something after a couple of days.
   const pace = elapsed >= 2 ? a.used / elapsed : undefined
   const projected = pace !== undefined ? pace * daysInMonth : undefined
   const projPct = projected !== undefined && a.limit > 0 ? projected / a.limit : undefined
-  const hitsOn = pace && a.limit > a.used ? new Date(monthStart + (a.limit / pace) * DAY) : undefined
+  const hitsOn = !unlimited && pace && a.limit > a.used ? new Date(monthStart + (a.limit / pace) * DAY) : undefined
 
   let status: ReactNode
   let tone = ''
-  if (a.used >= a.limit) {
+  if (!unlimited && a.used >= a.limit) {
     status = L('Bateu o limite: parado até o mês virar ou você subir o limite', 'Hit the limit: stopped until the month turns or you raise the limit')
     tone = 'is-danger'
   } else if (projPct !== undefined && projPct >= 1 && hitsOn) {
@@ -326,7 +386,9 @@ function AgentRow({ agent: a, stats, elapsed, daysInMonth, monthStart }: { agent
       </span>
       <span className="usage-agent__nums">
         <strong>{tokens(a.used)}</strong>
-        <span className="muted small">{L('de', 'of')} {tokens(a.limit)} · {percent(pct)}</span>
+        <span className="muted small">
+          {unlimited ? L('sem limite', 'no limit') : `${L('de', 'of')} ${tokens(a.limit)} · ${percent(pct)}`}
+        </span>
       </span>
       <Icon name="chevron" size={14} />
     </button>
@@ -385,7 +447,7 @@ function Backstage({ u }: { u: UsageReport }): ReactNode {
   const rows = [
     { key: 'router', name: L('Roteador', 'Router'), what: L('escolhe quem responde nos canais', 'picks who replies in channels'), tokens: of('router') },
     { key: 'memory', name: L('Memória', 'Memory'), what: L('resume conversas e sugere memórias', 'summarizes conversations and suggests memories'), tokens: of('memory') },
-    ...(tuca ? [{ key: 'tuca', name: 'Tuca', what: L('monta agentes com você', 'builds agents with you'), tokens: of(tuca.id) }] : [])
+    ...(tuca ? [{ key: 'tuca', name: 'Tuca', what: L('te ajuda com o Tucano e monta agentes', 'helps you with Tucano and builds agents'), tokens: of(tuca.id) }] : [])
   ]
   const total = rows.reduce((a, r) => a + r.tokens, 0)
   return (
@@ -412,7 +474,7 @@ function Backstage({ u }: { u: UsageReport }): ReactNode {
 
 function Receipts(): ReactNode {
   const [shown, setShown] = useState(10)
-  const all = useStore((s) => s.messages.filter((m) => m.run?.receipt))
+  const all = useStore(receipts)
   const recent = [...all].sort((a, b) => b.at - a.at)
   if (recent.length === 0) return null
   return (
@@ -444,7 +506,7 @@ function Receipts(): ReactNode {
 }
 
 function ReceiptRow({ id }: { id: string }): ReactNode {
-  const m = useStore((s) => s.messages.find((x) => x.id === id)!)
+  const m = useStore((s) => messageById(s, id)!)
   const agent = useStore((s) => (m.author.kind === 'agent' ? agentById(s, m.author.id) : undefined))
   const conv = useStore((s) => s.conversations.find((c) => c.id === m.conversationId))
   const r = m.run!.receipt!

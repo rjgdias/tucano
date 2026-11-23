@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { fileOf, linksIn, parsePage, summaryOf, Wiki, WikiConflict, wikiCall } from '../src/core/wiki'
 import { wikiAccess } from '../src/shared/types'
+import { setLang } from '../src/shared/lang'
 
 const fresh = (): Wiki => {
   const root = mkdtempSync(join(tmpdir(), 'tucano-wiki-'))
@@ -69,6 +70,44 @@ describe('the wiki folder', () => {
     expect(w.scan()).toBe(false) // nothing new the second time
   })
 
+  it("writes its keys in the workspace's language, and changes the ones a page has in the other", () => {
+    try {
+      const w = fresh()
+      w.save({ title: 'Marcos Lima', kind: 'Pessoa', body: 'Cliente.', ...by })
+      const text = (t: string): string => readFileSync(join(w.dir, 'pages', `${t}.md`), 'utf8')
+      expect(Object.keys(parsePage(text('Marcos Lima')).meta).sort()).toEqual(['atualizada', 'criada', 'tipo'])
+      // The workspace turns English: a Portuguese page keeps its keys, and gets no English ones on top.
+      setLang('en')
+      const p = w.page('Marcos Lima')!
+      w.save({ title: 'Marcos Lima', kind: 'Client', body: 'Client.', expectedHash: p.hash, ...by })
+      expect(parsePage(text('Marcos Lima')).meta).toMatchObject({ tipo: 'Client' })
+      expect(Object.keys(parsePage(text('Marcos Lima')).meta).sort()).toEqual(['atualizada', 'criada', 'tipo'])
+      w.save({ title: 'Ana', kind: 'Person', body: 'Designer.', ...by })
+      expect(Object.keys(parsePage(text('Ana')).meta).sort()).toEqual(['created', 'type', 'updated'])
+      expect(w.page('Ana')!.kind).toBe('Person')
+      // and back in Portuguese, the English page's own keys are the ones changed
+      setLang('pt')
+      w.save({ title: 'Ana', kind: 'Pessoa', body: 'Designer.', expectedHash: w.page('Ana')!.hash, ...by })
+      expect(Object.keys(parsePage(text('Ana')).meta).sort()).toEqual(['created', 'type', 'updated'])
+      expect(w.page('Ana')!.kind).toBe('Pessoa')
+    } finally {
+      setLang('pt')
+    }
+  })
+
+  it("takes a frontmatter block at the top of a body out of the text, keeping the page's own keys", () => {
+    const w = fresh()
+    const p = w.save({ title: 'Shipper', body: '\n---\ntipo: Agente\ncriada: 2020-01-01\ntags:\n  - time\nalias: Ship\n---\n\n# Shipper\n\nInstala.', ...by })
+    expect(p.kind).toBe('Agente')
+    expect(p.body.trimStart().startsWith('# Shipper')).toBe(true)
+    const meta = parsePage(readFileSync(join(w.dir, 'pages', 'Shipper.md'), 'utf8')).meta
+    expect(meta).toMatchObject({ tipo: 'Agente', tags: 'time', alias: 'Ship' })
+    expect(meta['criada']).not.toBe('2020-01-01') // the dates are the ones Tucano keeps
+    // A kind given wins over the block's; a body that only opens with a rule stays as written.
+    expect(w.save({ title: 'Outra', kind: 'Projeto', body: '---\ntipo: Agente\n---\nTexto.', ...by }).kind).toBe('Projeto')
+    expect(w.save({ title: 'Regra', body: '---\nUm parágrafo entre réguas.\n---\nFim.', ...by }).body).toContain('Um parágrafo entre réguas.')
+  })
+
   it('renames a page, deletes it, and brings it back from its history', () => {
     const w = fresh()
     const p = w.save({ title: 'Marcos', body: 'Cliente.', ...by })
@@ -102,5 +141,93 @@ describe('the agents and the wiki', () => {
     expect(linksIn('[[A]] e [[B|bê]] e [[C#seção]] ```[[D]]```')).toEqual(['A', 'B', 'C'])
     expect(summaryOf('# Título\n\n- **Cliente** de [[Marcos Lima|Marcos]].')).toBe('Cliente de Marcos.')
     expect(fileOf('a/b: c?')).toBe('a-b- c-.md')
+  })
+})
+
+describe('reading the folder behind the window', () => {
+  it('a start indexes the folder without blocking, then watches it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'tucano-wiki-'))
+    const dir = join(root, 'vault')
+    mkdirSync(join(dir, '.obsidian'), { recursive: true })
+    mkdirSync(join(dir, 'Clientes'))
+    for (let i = 0; i < 40; i++) writeFileSync(join(dir, 'Clientes', `Cliente ${i}.md`), `Cliente número ${i}, ligado a [[Cliente ${(i + 1) % 40}]].\n`)
+    let changes = 0
+    const w = new Wiki({ dir, indexPath: join(root, 'wiki.db'), onChange: () => changes++ })
+    w.init(true, true)
+    expect(w.list()).toEqual([]) // nothing read yet: init returned at once
+    await w.loaded
+    expect(w.list()).toHaveLength(40)
+    expect(w.page('Cliente 3')?.kind).toBe('Clientes')
+    expect(changes).toBe(1) // the screen hears that the pages came in
+    w.close()
+
+    // Opened again with nothing changed: no change to tell.
+    const again = new Wiki({ dir, indexPath: join(root, 'wiki.db'), onChange: () => changes++ })
+    again.init(false, true)
+    await again.loaded
+    expect(again.list()).toHaveLength(40)
+    expect(changes).toBe(1)
+    again.close()
+  })
+
+  it('what the app wrote after the folder was listed is not taken for a change from outside', () => {
+    const w = fresh()
+    w.save({ title: 'Antiga', body: 'v1', ...by })
+    const listed: [string, number][] = [['Antiga.md', 1]] // as the folder was a moment ago
+    w.save({ title: 'Antiga', body: 'v2', ...by, expectedHash: w.page('Antiga')!.hash })
+    w.save({ title: 'Nova', body: 'escrita agora', ...by })
+    const inner = w as unknown as { applyFiles: (found: [string, number][], late: boolean, logs: string[]) => boolean; removeMissing: (found: [string, number][], gone: Set<string>, late: boolean, logs: string[]) => boolean }
+    expect(inner.applyFiles(listed, true, [])).toBe(false)
+    expect(inner.removeMissing(listed, new Set(), true, [])).toBe(false)
+    expect(w.page('Nova')?.body).toContain('escrita agora') // not dropped as gone from the folder
+    expect(w.history('Antiga').every((v) => v.by !== 'outside')).toBe(true)
+  })
+
+  it('a page deleted after the folder was listed leaves the index', () => {
+    const w = fresh()
+    w.save({ title: 'Some', body: 'logo some', ...by })
+    const listed: [string, number][] = [['Some.md', 1]]
+    rmSync(join(w.dir, 'pages', 'Some.md'))
+    const inner = w as unknown as { applyFiles: (found: [string, number][], late: boolean, logs: string[], gone: Set<string>) => boolean; removeMissing: (found: [string, number][], gone: Set<string>, late: boolean, logs: string[]) => boolean }
+    const gone = new Set<string>()
+    const logs: string[] = []
+    inner.applyFiles(listed, true, logs, gone)
+    expect(inner.removeMissing(listed, gone, true, logs)).toBe(true)
+    expect(w.page('Some')).toBeUndefined()
+    expect(logs).toEqual(['Some saiu da pasta'])
+  })
+
+  it('the map and the log are read again only after something changed', () => {
+    const w = fresh()
+    w.save({ title: 'A', body: 'liga a [[B]]', ...by })
+    const g1 = w.graph()
+    expect(w.graph()).toBe(g1)
+    const log1 = w.log()
+    expect(w.log()).toBe(log1)
+    w.save({ title: 'B', body: 'agora existe', ...by })
+    const g2 = w.graph()
+    expect(g2).not.toBe(g1)
+    expect(g2.nodes.find((n) => n.title === 'B')?.missing).toBeUndefined()
+    expect(w.log()).not.toBe(log1)
+    expect(w.log()[0]).toContain('B')
+  })
+})
+
+describe('approving all that waits', () => {
+  it('puts in every waiting change oldest first, makes again the ones that ran into the one before, and leaves what no longer fits', () => {
+    const w = fresh()
+    w.save({ title: 'Obra', body: 'Começa em janeiro.', ...by })
+    const a = w.addChange({ ops: [{ op: 'append', page: 'Obra', text: 'Piso: porcelanato.' }], by: 'auto' })
+    const b = w.addChange({ ops: [{ op: 'append', page: 'Obra', text: 'Pintura: branco gelo.' }], by: 'auto' })
+    const gone = w.addChange({ ops: [{ op: 'replace', page: 'Obra', old: 'Começa em janeiro.', new: 'Começa em março.' }], by: 'auto' })
+    const review = w.addChange({ ops: [{ op: 'append', page: 'Obra', text: 'Revisar.' }], by: 'review' })
+    w.save({ title: 'Obra', body: 'Começa em fevereiro.', ...by, expectedHash: w.page('Obra')!.hash })
+    expect(w.applyWaiting('Ana')).toEqual({ applied: 2, left: 1 })
+    expect(w.page('Obra')!.body).toContain('Piso: porcelanato.')
+    expect(w.page('Obra')!.body).toContain('Pintura: branco gelo.')
+    expect(w.page('Obra')!.body).not.toContain('março')
+    expect(w.change(gone.id)!.state).toBe('conflict')
+    expect(w.change(review.id)!.state).toBe('pending')
+    expect([a, b].map((c) => w.change(c.id)!.state)).toEqual(['refused', 'refused']) // made again, and those went in
   })
 })

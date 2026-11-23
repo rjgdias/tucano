@@ -1,10 +1,14 @@
-// Small windows over the app (a channel's members, name and topic) and the
+// Small windows over the app (a channel's members and settings) and the
 // right-click menu. Which window is open lives in the store, so the sidebar's
 // menu and the channel's header open the same ones.
 import { L } from '../../../shared/lang'
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
-import { agentById, archiveAgent, isTeam, openTuca, createChannel, finishConnectorAuth, getState, navigate, openDialog, openDm, renameChannel, setChannelMembers, setTopic, shortcut, useStore, type State, type View } from '../store'
+import { useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent as KeyEvent, type ReactNode } from 'react'
+import { agentById, amAdmin, archiveAgent, canEditChannel, deleteAgent, isTeam, openTuca, createChannel, finishConnectorAuth, getState, navigate, openDialog, openDm, renameChannel, setChannelMembers, setThreads, setTopic, shortcut, useStore, type Agent, type Conversation, type State, type View } from '../store'
 import { AgentAvatar, Icon, type IconName } from './ui'
+import { WorkspaceManager } from './WorkspaceManager'
+import { Modal } from './Modal'
+import { LoginHost } from './LoginTerminal'
+import { FeedbackDialog } from './Feedback'
 
 const message = (e: unknown): string => (e instanceof Error ? e.message.replace(/^Error invoking.*?: /, '') : String(e))
 
@@ -13,6 +17,7 @@ export function Dialogs(): ReactNode {
     <>
       <DialogBody />
       <ConfirmHost />
+      <LoginHost />
     </>
   )
 }
@@ -22,7 +27,8 @@ export function Dialogs(): ReactNode {
 // resolves true when the person clicks the confirm button (named with the verb and the
 // thing: “Excluir #lancamento”), false on Cancelar, Esc or a click outside. danger is for
 // what can't be undone: red button, and Cancelar holds the focus so Enter doesn't destroy.
-type Ask = { title: string; body?: string; confirm: string; danger?: boolean; resolve: (ok: boolean) => void }
+// typeToConfirm: what has to be typed before the confirm button works (an agent's name, for a deletion for good).
+type Ask = { title: string; body?: string; confirm: string; danger?: boolean; typeToConfirm?: string; resolve: (ok: boolean) => void }
 let asking: Ask | null = null
 const askListeners = new Set<() => void>()
 const setAsking = (a: Ask | null): void => {
@@ -30,7 +36,7 @@ const setAsking = (a: Ask | null): void => {
   askListeners.forEach((l) => l())
 }
 
-export function confirmDialog(o: { title: string; body?: string; confirm: string; danger?: boolean }): Promise<boolean> {
+export function confirmDialog(o: { title: string; body?: string; confirm: string; danger?: boolean; typeToConfirm?: string }): Promise<boolean> {
   asking?.resolve(false)
   return new Promise((resolve) => setAsking({ ...o, resolve }))
 }
@@ -44,6 +50,12 @@ function ConfirmHost(): ReactNode {
     () => asking
   )
   if (!ask) return null
+  return <ConfirmBody key={ask.title} ask={ask} />
+}
+
+function ConfirmBody({ ask }: { ask: Ask }): ReactNode {
+  const [typed, setTyped] = useState('')
+  const blocked = !!ask.typeToConfirm && typed.trim().toLowerCase() !== ask.typeToConfirm.trim().toLowerCase()
   const answer = (ok: boolean): void => {
     if (asking !== ask) return
     setAsking(null)
@@ -56,12 +68,18 @@ function ConfirmHost(): ReactNode {
           {p}
         </p>
       ))}
+      {ask.typeToConfirm && (
+        <label className="field">
+          <span className="small">{L(`Digite ${ask.typeToConfirm} pra confirmar`, `Type ${ask.typeToConfirm} to confirm`)}</span>
+          <input autoFocus value={typed} spellCheck={false} onChange={(e) => setTyped(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && !blocked && answer(true)} />
+        </label>
+      )}
       <footer className="modal__foot">
         <span className="grow" />
-        <button className="btn btn--ghost btn--sm" autoFocus={ask.danger} onClick={() => answer(false)}>
+        <button className="btn btn--ghost btn--sm" autoFocus={ask.danger && !ask.typeToConfirm} onClick={() => answer(false)}>
           {L('Cancelar', 'Cancel')}
         </button>
-        <button className={`btn btn--sm ${ask.danger ? 'btn--danger' : 'btn--primary'}`} autoFocus={!ask.danger} onClick={() => answer(true)}>
+        <button className={`btn btn--sm ${ask.danger ? 'btn--danger' : 'btn--primary'}`} autoFocus={!ask.danger} disabled={blocked} onClick={() => answer(true)}>
           {ask.confirm}
         </button>
       </footer>
@@ -73,66 +91,102 @@ function DialogBody(): ReactNode {
   const dialog = useStore((s) => s.dialog)
   const conv = useStore((s) => (s.dialog && 'id' in s.dialog ? s.conversations.find((c) => c.id === (s.dialog as { id: string }).id) : undefined))
   const close = (): void => openDialog(null)
+  if (dialog?.kind === 'workspaces') return <WorkspaceManager onClose={close} create={dialog.create} />
   if (dialog?.kind === 'search') return <Search onClose={close} />
   if (dialog?.kind === 'archived') return <Archived onClose={close} />
   if (dialog?.kind === 'oauth') return <OAuthDialog id={dialog.id} url={dialog.url} onClose={close} />
-  if (dialog?.kind === 'new-channel')
-    return <TextDialog title={L('Novo canal', 'New channel')} label={L('Nome', 'Name')} value="" hint={L('Minúsculas e hífens: “Squad Pagamentos” vira squad-pagamentos. Depois você escolhe os agentes.', 'Lowercase and hyphens: “Payments Squad” becomes payments-squad. You pick the agents next.')} prefix="#" onSave={(v) => createChannel(v)} onClose={() => getState().dialog?.kind === 'new-channel' && close()} />
+  if (dialog?.kind === 'feedback') return <FeedbackDialog {...(dialog.image ? { image: dialog.image } : {})} {...(dialog.draft ? { draft: dialog.draft } : {})} {...(dialog.from ? { from: dialog.from } : {})} onClose={close} />
+  if (dialog?.kind === 'new-channel') return <SettingsDialog onClose={() => getState().dialog?.kind === 'new-channel' && close()} />
   if (!dialog || !conv) return null
   if (dialog.kind === 'members') return <MembersDialog id={conv.id} name={conv.name} members={conv.members} onClose={close} />
-  if (dialog.kind === 'rename')
-    return <TextDialog title={L(`Renomear #${conv.name}`, `Rename #${conv.name}`)} label={L('Nome', 'Name')} value={conv.name} hint={L('Minúsculas e hífens: “Lançamento do App” vira lancamento-do-app.', 'Lowercase and hyphens: “App Launch” becomes app-launch.')} prefix="#" onSave={(v) => renameChannel(conv.id, v)} onClose={close} />
-  return <TextDialog title={L(`Tema de #${conv.name}`, `Topic of #${conv.name}`)} label={L('Tema', 'Topic')} value={conv.topic ?? ''} hint={L('Uma linha no topo do canal dizendo pra que ele serve. Vazio, some.', 'One line at the top of the channel saying what it is for. Empty, it goes away.')} onSave={(v) => setTopic(conv.id, v)} onClose={close} allowEmpty />
+  return <SettingsDialog conv={conv} onClose={close} />
 }
 
-// Open windows, newest last: Esc and Tab belong to the one on top only.
-const openModals: object[] = []
-const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }): ReactNode {
-  const card = useRef<HTMLDivElement>(null)
-  const close = useRef(onClose)
-  close.current = onClose
-  useEffect(() => {
-    const me = {}
-    openModals.push(me)
-    const before = document.activeElement as HTMLElement | null
-    if (!card.current?.contains(document.activeElement)) card.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus()
-    // Captured before the page's own keys, so an Esc here doesn't also close what's behind.
-    const keys = (e: KeyboardEvent): void => {
-      if (openModals[openModals.length - 1] !== me) return
-      if (e.key === 'Escape') {
-        e.stopImmediatePropagation()
-        e.preventDefault()
-        close.current()
-      } else if (e.key === 'Tab' && card.current) {
-        const all = [...card.current.querySelectorAll<HTMLElement>(FOCUSABLE)]
-        if (!all.length) return
-        const [first, last] = [all[0]!, all[all.length - 1]!]
-        const inside = card.current.contains(document.activeElement)
-        if (e.shiftKey && (document.activeElement === first || !inside)) (e.preventDefault(), last.focus())
-        else if (!e.shiftKey && (document.activeElement === last || !inside)) (e.preventDefault(), first.focus())
-      }
-    }
-    window.addEventListener('keydown', keys, true)
-    return () => {
-      window.removeEventListener('keydown', keys, true)
-      openModals.splice(openModals.indexOf(me), 1)
-      if (before?.isConnected) before.focus()
-    }
-  }, [])
+// A channel's name, topic and where its agents answer; a DM's, only where. Without `conv`, a new channel.
+function SettingsDialog({ conv, onClose }: { conv?: Conversation; onClose: () => void }): ReactNode {
+  const dmName = useStore((s) => (conv?.kind === 'dm' && conv.members[0] ? agentById(s, conv.members[0])?.name : undefined))
+  const channel = conv?.kind !== 'dm'
+  // A channel's name and topic are its maker's and the admins'; anyone else only sees them.
+  // Where a DM's agent answers is up to whoever is in it.
+  const editable = useStore((s) => !conv || conv.kind === 'dm' || canEditChannel(s, conv))
+  const [name, setName] = useState(conv?.name ?? '')
+  const [topic, setTopicText] = useState(conv?.topic ?? '')
+  const [threads, setThreadsOn] = useState(!!conv?.threads)
+  const [error, setError] = useState<string | null>(null)
+  // Saving with no name: the field shakes and goes red, instead of nothing happening.
+  const [invalid, setInvalid] = useState(false)
+  const [shaking, setShaking] = useState(false)
+  const save = (): void => {
+    if (channel && !name.trim()) return void (setInvalid(true), setShaking(true))
+    const done = !conv
+      ? createChannel(name, threads)
+      : Promise.all([
+          channel && editable && name.trim() !== conv.name ? renameChannel(conv.id, name) : undefined,
+          channel && editable && topic.trim() !== (conv.topic ?? '') ? setTopic(conv.id, topic) : undefined,
+          editable && threads !== !!conv.threads ? setThreads(conv.id, threads) : undefined
+        ])
+    done.then(onClose, (e: unknown) => setError(message(e)))
+  }
+  const enter = (e: KeyEvent): void => void (e.key === 'Enter' && save())
+  const choices = [
+    { on: false, label: L('Na conversa, como um chat', 'In the conversation, like a chat'), about: L('As respostas vêm logo abaixo da mensagem.', 'Answers come right below the message.') },
+    { on: true, label: L('Em threads, uma por mensagem', 'In threads, one per message'), about: L('Cada mensagem abre uma thread na lateral, com as respostas dela.', 'Each message opens a thread on the side, with its answers.') }
+  ]
+  const title = !conv ? L('Novo canal', 'New channel') : channel ? L(`Configurações de #${conv.name}`, `#${conv.name} settings`) : L(`Conversa com ${dmName ?? 'o agente'}`, `Conversation with ${dmName ?? 'the agent'}`)
   return (
-    <div className="modal" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal__card" role="dialog" aria-modal="true" aria-label={title} ref={card}>
-        <header className="modal__head">
-          <strong>{title}</strong>
-          <button className="icon-btn icon-btn--sm" title={L('Fechar', 'Close')} onClick={onClose}>
-            <Icon name="x" size={14} />
-          </button>
-        </header>
-        {children}
-      </div>
-    </div>
+    <Modal title={title} onClose={onClose}>
+      {channel && (
+        <label className="field">
+          <span className="field__label">{L('Nome', 'Name')}</span>
+          <span className={`row row--center modal__input ${invalid ? 'is-invalid' : ''} ${shaking ? 'is-shaking' : ''}`} onAnimationEnd={() => setShaking(false)}>
+            <span className="muted">#</span>
+            <input autoFocus className="grow" value={name} readOnly={!editable} onChange={(e) => (setName(e.target.value), setInvalid(false))} onKeyDown={enter} />
+          </span>
+          <span className="hint">
+            {conv
+              ? L('Minúsculas e hífens: “Lançamento do App” vira lancamento-do-app.', 'Lowercase and hyphens: “App Launch” becomes app-launch.')
+              : L('Minúsculas e hífens: “Squad Pagamentos” vira squad-pagamentos. Depois você escolhe os agentes.', 'Lowercase and hyphens: “Payments Squad” becomes payments-squad. You pick the agents next.')}
+          </span>
+        </label>
+      )}
+      {channel && conv && (
+        <label className="field">
+          <span className="field__label">{L('Tema', 'Topic')}</span>
+          <span className="row row--center modal__input">
+            <input className="grow" value={topic} readOnly={!editable} onChange={(e) => setTopicText(e.target.value)} onKeyDown={enter} />
+          </span>
+          <span className="hint">
+            {editable
+              ? L('Uma linha no topo do canal dizendo pra que ele serve. Vazio, some.', "One-line channel description. Leave empty to hide it.")
+              : L('O nome, o tema e os agentes, quem muda é quem criou o canal ou um admin.', 'The name, topic and agents are changed by whoever created the channel or an admin.')}
+          </span>
+        </label>
+      )}
+      {editable && <div className="field">
+        <span className="field__label" id="answers-where">
+          {L('Onde os agentes respondem', 'Where the agents answer')}
+        </span>
+        <div className="choices" role="radiogroup" aria-labelledby="answers-where">
+          {choices.map((c) => (
+            <button key={String(c.on)} type="button" role="radio" aria-checked={threads === c.on} className={`choice ${threads === c.on ? 'is-on' : ''}`} onClick={() => setThreadsOn(c.on)}>
+              <b>{c.label}</b>
+              <small>{c.about}</small>
+            </button>
+          ))}
+        </div>
+        <span className="hint">{L('Dá pra abrir uma thread numa mensagem quando quiser, nos dois jeitos.', 'You can open a thread on a message whenever you want, either way.')}</span>
+      </div>}
+      {error && <p className="field__error">{error}</p>}
+      <footer className="modal__foot">
+        <span className="grow" />
+        <button className="btn btn--ghost btn--sm" onClick={onClose}>
+          {L('Cancelar', 'Cancel')}
+        </button>
+        <button className="btn btn--primary btn--sm" disabled={channel && !name.trim()} onClick={save}>
+          {conv ? L('Salvar', 'Save') : L('Criar canal', 'Create channel')}
+        </button>
+      </footer>
+    </Modal>
   )
 }
 
@@ -182,44 +236,6 @@ function MembersDialog({ id, name, members, onClose }: { id: string; name: strin
   )
 }
 
-function TextDialog(p: { title: string; label: string; value: string; hint: string; prefix?: string; allowEmpty?: boolean; onSave: (v: string) => Promise<void>; onClose: () => void }): ReactNode {
-  const [value, setValue] = useState(p.value)
-  const [error, setError] = useState<string | null>(null)
-  // Enter on an empty name: the field shakes and goes red, instead of nothing happening.
-  const [invalid, setInvalid] = useState(false)
-  const [shaking, setShaking] = useState(false)
-  const save = (): void => {
-    if (!p.allowEmpty && !value.trim()) {
-      setInvalid(true)
-      setShaking(true)
-      return
-    }
-    p.onSave(value).then(p.onClose, (e: unknown) => setError(message(e)))
-  }
-  return (
-    <Modal title={p.title} onClose={p.onClose}>
-      <label className="field">
-        <span className="field__label">{p.label}</span>
-        <span className={`row row--center modal__input ${invalid ? 'is-invalid' : ''} ${shaking ? 'is-shaking' : ''}`} onAnimationEnd={() => setShaking(false)}>
-          {p.prefix && <span className="muted">{p.prefix}</span>}
-          <input autoFocus className="grow" value={value} onChange={(e) => (setValue(e.target.value), setInvalid(false))} onKeyDown={(e) => e.key === 'Enter' && save()} />
-        </span>
-        <span className="hint">{p.hint}</span>
-      </label>
-      {error && <p className="field__error">{error}</p>}
-      <footer className="modal__foot">
-        <span className="grow" />
-        <button className="btn btn--ghost btn--sm" onClick={p.onClose}>
-          {L('Cancelar', 'Cancel')}
-        </button>
-        <button className="btn btn--primary btn--sm" disabled={!p.allowEmpty && !value.trim()} onClick={save}>
-          {L('Salvar', 'Save')}
-        </button>
-      </footer>
-    </Modal>
-  )
-}
-
 // Signing a connector in on a server: the authorization page opens here, and its
 // last stop (the server's loopback, which this browser can't reach) is pasted back.
 function OAuthDialog({ id, url, onClose }: { id: string; url: string; onClose: () => void }): ReactNode {
@@ -232,6 +248,15 @@ function OAuthDialog({ id, url, onClose }: { id: string; url: string; onClose: (
   const [pasted, setPasted] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // A server on its https address gets the provider's answer itself (src/server's /oauth/callback):
+  // nothing to paste, this closes when the connector is in.
+  const automatic = (() => {
+    try {
+      return !!new URL(url).searchParams.get('redirect_uri')?.startsWith(`${location.origin}/oauth/callback`)
+    } catch {
+      return false
+    }
+  })()
   const finish = (): void => {
     if (!pasted.trim() || busy) return
     setBusy(true)
@@ -251,35 +276,59 @@ function OAuthDialog({ id, url, onClose }: { id: string; url: string; onClose: (
           {L('Abrir a página de autorização', 'Open the authorization page')}
         </a>
       </p>
-      <label className="field">
-        <span className="field__label">{L('2. Cole aqui o endereço em que ela terminou', '2. Paste the address it ended on')}</span>
-        <span className="row row--center modal__input">
-          <input autoFocus className="grow" placeholder="http://127.0.0.1:…/oauth/callback?code=…" value={pasted} onChange={(e) => setPasted(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && finish()} />
-        </span>
-        <span className="hint">
-          {L(
-            'Depois de permitir, o navegador vai pra um endereço que começa com http://127.0.0.1 e mostra que a página não abre. É normal: o Tucano está no servidor. Copie o endereço inteiro da barra e cole aqui.',
-            'After you allow it, the browser goes to an address starting with http://127.0.0.1 and says the page can’t be reached. That’s expected: Tucano is on the server. Copy the whole address from the bar and paste it here.'
-          )}
-        </span>
-      </label>
+      {automatic ? (
+        <p className="small muted">{L('2. Depois de permitir, volte pra cá: o Tucano conecta sozinho e esta janela fecha.', "2. Once you allow it, come back here. Tucano connects and closes this window.")}</p>
+      ) : (
+        <label className="field">
+          <span className="field__label">{L('2. Cole aqui o endereço em que ela terminou', '2. Paste the address it ended on')}</span>
+          <span className="row row--center modal__input">
+            <input autoFocus className="grow" placeholder="http://127.0.0.1:…/oauth/callback?code=…" value={pasted} onChange={(e) => setPasted(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && finish()} />
+          </span>
+          <span className="hint">
+            {L(
+              'Depois de permitir, o navegador vai pra um endereço que começa com http://127.0.0.1 e mostra que a página não abre. É normal: o Tucano está no servidor. Copie o endereço inteiro da barra e cole aqui.',
+              "After you allow it, a 127.0.0.1 page may not load, because Tucano runs on a server. Copy the full address and paste it here."
+            )}
+          </span>
+        </label>
+      )}
       {error && <p className="field__error">{error}</p>}
       <footer className="modal__foot">
         <span className="grow" />
         <button className="btn btn--ghost btn--sm" onClick={onClose}>
           {L('Cancelar', 'Cancel')}
         </button>
-        <button className="btn btn--primary btn--sm" disabled={!pasted.trim() || busy} onClick={finish}>
-          {L('Concluir', 'Finish')}
-        </button>
+        {!automatic && (
+          <button className="btn btn--primary btn--sm" disabled={!pasted.trim() || busy} onClick={finish}>
+            {L('Concluir', 'Finish')}
+          </button>
+        )}
       </footer>
     </Modal>
   )
 }
 
-// The agents taken out of the sidebar, to see or bring back.
+// Deleting an archived agent for good, asked with its name typed in: the agents page and the archived list both ask this.
+export function confirmDeleteAgent(agent: Pick<Agent, 'id' | 'name'>): Promise<boolean> {
+  return confirmDialog({
+    title: L(`Excluir ${agent.name} para sempre?`, `Delete ${agent.name} for good?`),
+    body: L(
+      `As mensagens que ${agent.name} escreveu continuam nas conversas, com o nome riscado, e os recibos continuam em Uso e limites. Vão embora as instruções, as permissões, as memórias dele, as rotinas, o computador, os logins do navegador e os arquivos da pasta dele.\n\nNão dá pra desfazer.`,
+      `Messages written by ${agent.name} remain in conversations with the name struck out; receipts remain in Usage and limits. Its instructions, permissions, memories, routines, computer, browser logins and folder are deleted.\n\nThis cannot be undone.`
+    ),
+    confirm: L(`Excluir ${agent.name}`, `Delete ${agent.name}`),
+    danger: true,
+    typeToConfirm: agent.name
+  }).then((ok) => {
+    if (ok) void deleteAgent(agent.id)
+    return ok
+  })
+}
+
+// The agents taken out of the sidebar, to see, bring back or delete for good.
 function Archived({ onClose }: { onClose: () => void }): ReactNode {
-  const agents = useStore((s) => s.agents.filter((a) => a.archived))
+  const agents = useStore((s) => s.agents.filter((a) => a.archived && !a.deleted))
+  const admin = useStore(amAdmin)
   return (
     <Modal title={L('Agentes arquivados', 'Archived agents')} onClose={onClose}>
       <p className="muted small modal__lead">{L('Não respondem, não rodam rotinas e não são escolhidos pra responder nos canais. O histórico e os recibos continuam. Reativado, o agente volta aos canais em que estava; as rotinas dele você liga de novo em Rotinas.', 'They don’t reply, don’t run routines and aren’t picked to answer in channels. History and receipts stay. Once reactivated, an agent returns to the channels it was in; you turn its routines back on in Routines.')}</p>
@@ -309,6 +358,11 @@ function Archived({ onClose }: { onClose: () => void }): ReactNode {
               <button className="btn btn--sm" onClick={() => void archiveAgent(a.id, false)}>
                 {L('Reativar', 'Reactivate')}
               </button>
+              {admin && a.kind !== 'tuca' && (
+                <button className="btn btn--sm btn--ghost member__delete" title={L('Excluir para sempre', 'Delete for good')} aria-label={L(`Excluir ${a.name} para sempre`, `Delete ${a.name} for good`)} onClick={() => void confirmDeleteAgent(a)}>
+                  <Icon name="trash" size={14} />
+                </button>
+              )}
             </div>
           ))}
         </div>
@@ -327,15 +381,23 @@ const fold = (s: string): string =>
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
 
-const PAGES = (): { label: string; view: View; icon: IconName }[] => [
+// The report and the usage are the admins' screens, as in the sidebar.
+const PAGES = (admin = true): { label: string; view: View; icon: IconName }[] => [
   { label: L('Aprovações', 'Approvals'), view: { kind: 'approvals' }, icon: 'shield' },
+  { label: L('Quadro', 'Board'), view: { kind: 'board' }, icon: 'board' },
   { label: L('Memória', 'Memory'), view: { kind: 'memory' }, icon: 'book' },
   { label: 'Wiki', view: { kind: 'wiki' }, icon: 'layers' },
   { label: L('Rotinas', 'Routines'), view: { kind: 'routines' }, icon: 'clock' },
   { label: 'Skills', view: { kind: 'skills' }, icon: 'layers' },
-  { label: L('Boletim', 'Report'), view: { kind: 'report' }, icon: 'report' },
-  { label: L('Uso e limites', 'Usage and limits'), view: { kind: 'usage' }, icon: 'chart' },
+  { label: L('Time', 'Team'), view: { kind: 'org' }, icon: 'users' },
+  ...(admin
+    ? ([
+        { label: L('Boletim', 'Report'), view: { kind: 'report' }, icon: 'report' },
+        { label: L('Uso e limites', 'Usage and limits'), view: { kind: 'usage' }, icon: 'chart' }
+      ] as const)
+    : []),
   { label: L('Conectores', 'Connectors'), view: { kind: 'connectors' }, icon: 'plug' },
+  { label: L('Cofre', 'Vault'), view: { kind: 'vault' }, icon: 'key' },
   { label: L('Configurações', 'Settings'), view: { kind: 'settings' }, icon: 'gear' }
 ]
 
@@ -345,10 +407,15 @@ function hits(s: State): Hit[] {
     ...s.conversations.filter((c) => c.kind === 'channel').map((c): Hit => ({ key: c.id, label: `#${c.name}`, detail: c.topic ?? L('canal', 'channel'), icon: 'hash', go: () => navigate({ kind: 'conversation', id: c.id }) })),
     ...agents.map((a): Hit => ({ key: `dm-${a.id}`, label: a.name, detail: `${L('conversa', 'conversation')}${a.role ? ` · ${a.role}` : ''}`, agent: a.id, go: () => void openDm(a.id) })),
     ...agents.map((a): Hit => ({ key: `agent-${a.id}`, label: L(`${a.name}: configurar`, `${a.name}: settings`), detail: `@${a.handle}`, icon: 'edit', go: () => navigate({ kind: 'agent', id: a.id }) })),
-    ...PAGES().map((p): Hit => ({ key: p.label, label: p.label, detail: L('tela', 'page'), icon: p.icon, go: () => navigate(p.view) })),
+    ...PAGES(amAdmin(s)).map((p): Hit => ({ key: p.label, label: p.label, detail: L('tela', 'page'), icon: p.icon, go: () => navigate(p.view) })),
     { key: 'new-channel', label: L('Novo canal', 'New channel'), detail: shortcut(getState().platform, 'N'), icon: 'plus', go: () => openDialog({ kind: 'new-channel' }) },
-    { key: 'tuca', label: L('Tuca: montar um agente', 'Tuca: build an agent'), detail: L('conversa', 'conversation'), icon: 'plus', go: openTuca },
-    { key: 'new-agent', label: L('Novo agente (formulário)', 'New agent (form)'), detail: L('ação', 'action'), icon: 'plus', go: () => navigate({ kind: 'new-agent' }) }
+    // Making agents is the admins'.
+    ...(amAdmin(s)
+      ? [
+          { key: 'tuca', label: L('Tuca: montar um agente', 'Tuca: build an agent'), detail: L('conversa', 'conversation'), icon: 'plus' as const, go: openTuca },
+          { key: 'new-agent', label: L('Novo agente (formulário)', 'New agent (form)'), detail: L('ação', 'action'), icon: 'plus' as const, go: () => navigate({ kind: 'new-agent' }) }
+        ]
+      : [])
   ]
 }
 
@@ -408,7 +475,8 @@ function Search({ onClose }: { onClose: () => void }): ReactNode {
 
 // ---------- the right-click menu ----------
 
-export type MenuItem = { label: string; icon?: IconName; danger?: boolean; onClick: () => void } | 'separator'
+// `checked`: an on/off item, ticked while on.
+export type MenuItem = { label: string; icon?: IconName; danger?: boolean; checked?: boolean; onClick: () => void } | 'separator'
 export type MenuState = { x: number; y: number; items: MenuItem[] } | null
 
 export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }): ReactNode {
@@ -441,7 +509,8 @@ export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () =>
         ) : (
           <button
             key={i}
-            role="menuitem"
+            role={it.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+            aria-checked={it.checked}
             className={`menu__item ${it.danger ? 'is-danger' : ''}`}
             onClick={() => {
               onClose()
@@ -450,6 +519,11 @@ export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () =>
           >
             {it.icon && <Icon name={it.icon} size={14} />}
             {it.label}
+            {it.checked && (
+              <span className="menu__check">
+                <Icon name="check" size={13} />
+              </span>
+            )}
           </button>
         )
       )}

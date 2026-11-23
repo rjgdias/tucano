@@ -102,6 +102,17 @@ describe('Telegram', () => {
     expect(api.sent.find((s) => s.method === 'editMessageText')!.body['text']).toContain('✅ Aprovado pelo Telegram')
   })
 
+  it('a key asked for (pedir_chave) is pasted in the app: the phone only refuses it', async () => {
+    await pair()
+    await tg.approvalAsked(ap({ connectorId: 'cofre', connectorName: 'Cofre', tool: 'pedir_chave', args: { nome: 'STRIPE_KEY' } }), 'Fin')
+    const msg = api.sent.at(-1)!
+    expect(msg.body['text']).toContain('Fin pede a chave STRIPE_KEY')
+    expect(JSON.stringify(msg.body['reply_markup'])).not.toContain('ap:ap1:ok')
+    api.push({ callback_query: { id: 'q1', data: 'ap:ap1:ok', message: { message_id: 100, chat: me } } }) // an old button
+    await settle()
+    expect(decided).toEqual([])
+  })
+
   it('a high-risk action needs a second tap; taps from another chat or on a decided request do nothing', async () => {
     await pair()
     await tg.approvalAsked(ap({ highRisk: true }), 'PM')
@@ -127,6 +138,18 @@ describe('Telegram', () => {
     api.push({ message: { message_id: 6, chat: stranger, text: 'hackeado', reply_to_message: { message_id: asked.id } } })
     await settle()
     expect(answered).toEqual([['c1', 'Sexta que vem']])
+  })
+
+  it('shows every decision as text, and a reply still answers', async () => {
+    await pair()
+    const questions = [{ question: 'Paginação no menu?', kind: 'single' as const, options: [{ label: 'Busca remota' }, { label: 'Scroll infinito' }] }, { question: 'Pra quando?', kind: 'text' as const }]
+    const question: Message = { id: 'm3', conversationId: 'c1', author: { kind: 'agent', id: 'a1' }, text: '', at: 0, run: { status: 'waiting_input', steps: [], questions } }
+    await tg.questionAsked(question, 'PM', '#simula-oab')
+    const asked = api.sent.at(-1)!
+    expect(asked.body['text']).toContain('PM pergunta (#simula-oab):\n\n1. Paginação no menu? (Busca remota | Scroll infinito)\n2. Pra quando?')
+    api.push({ message: { message_id: 8, chat: me, text: 'busca remota, sexta', reply_to_message: { message_id: asked.id } } })
+    await settle()
+    expect(answered).toEqual([['c1', 'busca remota, sexta']])
   })
 
   it("a reply to a question asked in a thread goes back to that thread", async () => {
