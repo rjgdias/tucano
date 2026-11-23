@@ -3,10 +3,12 @@
 import { L, locale } from '../../../shared/lang'
 import { useEffect, useState, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
+import { safeUrl } from '../links'
 import remarkGfm from 'remark-gfm'
-import { agentById, getState, openLightbox, artifactUrl, browserAction, browserInput, browserOf, reachable, windowless, computerOf, openExternal, openPanel, stopService, useStore, type Artifact } from '../store'
+import { agentById, amAdmin, amOwner, canSaveArtifact, getState, openLightbox, artifactUrl, saveArtifact, saveLabel, browserAction, browserInput, browserOf, reachable, windowless, computerOf, openExternal, openPanel, widenPanel, revealArtifact, stopService, useFrame, useStore, workingAgents, type Artifact } from '../store'
 import { call } from '../rpc'
 import { Icon, ownColor, type IconName } from './ui'
+import { PanelResize } from './SidebarResize'
 
 const KIND_LABEL = (): Record<Artifact['kind'], string> => ({
   image: L('Imagem', 'Image'),
@@ -24,39 +26,61 @@ export const bytes = (n: number): string => (n < 1024 ? `${n} B` : n < 1024 ** 2
 // The window's size, with the conversation's other images a key away.
 function showImages(a: Artifact): void {
   const images = getState().artifacts.filter((x) => x.kind === 'image' && x.conversationId === a.conversationId)
-  openLightbox(images.map((x) => ({ url: artifactUrl(x), title: x.title })), Math.max(0, images.findIndex((x) => x.id === a.id)))
+  openLightbox(images.map((x) => ({ url: artifactUrl(x), title: x.title, artifact: { id: x.id, name: x.name } })), Math.max(0, images.findIndex((x) => x.id === a.id)))
 }
 
 export function ArtifactCard({ id }: { id: string }): ReactNode {
   const a = useStore((s) => s.artifacts.find((x) => x.id === id))
   const open = useStore((s) => s.panel?.kind === 'artifact' && s.panel.id === id)
+  const canSave = useStore(canSaveArtifact)
   if (!a) return null
+  const save = canSave && (
+    <button className="artifact-card__open" title={a.name} onClick={() => saveArtifact(a)}>
+      {saveLabel()}
+    </button>
+  )
   if (a.kind === 'image')
     return (
-      <button className="artifact-image" onClick={() => showImages(a)} title={a.title}>
-        <img src={artifactUrl(a)} alt={a.title} />
-        <span className="artifact-image__caption">{a.title}</span>
-      </button>
-    )
-  return (
-    <button className={`artifact-card ${open ? 'is-open' : ''}`} onClick={() => openPanel({ kind: 'artifact', id })}>
-      <span className="artifact-card__icon">
-        <Icon name={a.kind === 'html' ? 'globe' : a.kind === 'video' ? 'play' : 'edit'} size={16} />
-      </span>
-      <span className="artifact-card__text">
-        <strong>{a.title}</strong>
-        <span className="muted small">
-          {KIND_LABEL()[a.kind]} · {a.name} · {bytes(a.size)}
+      <div className="artifact-image">
+        <button className="artifact-image__show" onClick={() => showImages(a)} title={a.title}>
+          <img src={artifactUrl(a)} alt={a.title} />
+        </button>
+        <span className="artifact-image__caption">
+          <span className="grow">{a.title}</span>
+          {save}
         </span>
-      </span>
-      <span className="artifact-card__open">{L('Abrir', 'Open')}</span>
-    </button>
+      </div>
+    )
+  // On a server, a file no browser shows (a .docx, a .zip) is only good downloaded: the panel would be empty.
+  const onlySave = windowless() && a.kind === 'file'
+  const show = (): void => (onlySave ? saveArtifact(a) : openPanel({ kind: 'artifact', id }))
+  return (
+    <div className={`artifact-card ${open ? 'is-open' : ''}`}>
+      <button className="artifact-card__main" onClick={show}>
+        <span className="artifact-card__icon">
+          <Icon name={a.kind === 'html' ? 'globe' : a.kind === 'video' ? 'play' : 'edit'} size={16} />
+        </span>
+        <span className="artifact-card__text">
+          <strong>{a.title}</strong>
+          <span className="muted small">
+            {KIND_LABEL()[a.kind]} · {a.name} · {bytes(a.size)}
+          </span>
+        </span>
+      </button>
+      {!onlySave && (
+        <button className="artifact-card__open" onClick={show}>
+          {L('Abrir', 'Open')}
+        </button>
+      )}
+      {save}
+    </div>
   )
 }
 
 export function ServiceCard({ agentId, name }: { agentId: string; name: string }): ReactNode {
   const svc = useStore((s) => computerOf(s, agentId)?.services.find((x) => x.name === name))
   const open = useStore((s) => s.panel?.kind === 'service' && s.panel.agentId === agentId && s.panel.name === name)
+  const admin = useStore(amAdmin) // stopping a service is the admins'
   if (!svc) return null
   return (
     <div className={`artifact-card artifact-card--service ${open ? 'is-open' : ''}`}>
@@ -74,9 +98,11 @@ export function ServiceCard({ agentId, name }: { agentId: string; name: string }
           <button className="btn btn--sm btn--primary" onClick={() => openPanel({ kind: 'service', agentId, name })}>
             {L('Abrir', 'Open')}
           </button>
-          <button className="btn btn--sm btn--ghost" onClick={() => stopService(agentId, name)}>
-            {L('Parar', 'Stop')}
-          </button>
+          {admin && (
+            <button className="btn btn--sm btn--ghost" onClick={() => stopService(agentId, name)}>
+              {L('Parar', 'Stop')}
+            </button>
+          )}
         </>
       )}
     </div>
@@ -113,7 +139,7 @@ const clock = (at: number): string => new Date(at).toLocaleTimeString(locale(), 
 
 // Live while the agent is answering with it, or while I drive it.
 function useLive(agentId: string): boolean {
-  const working = useStore((s) => s.messages.some((m) => m.author.kind === 'agent' && m.author.id === agentId && m.run?.status === 'working'))
+  const working = useStore((s) => workingAgents(s).has(agentId))
   const view = useStore((s) => browserOf(s, agentId))
   return working || !!view?.doing || !!view?.shown
 }
@@ -152,9 +178,10 @@ function UrlBar({ url }: { url: string }): ReactNode {
 // The screen: what Chrome streams, with the agent's cursor where it last clicked or typed.
 function BrowserScreen({ agentId, onOpen }: { agentId: string; onOpen?: () => void }): ReactNode {
   const view = useStore((s) => browserOf(s, agentId))
+  const frame = useFrame(agentId) // apart from the view: it changes many times a second
   const agent = useStore((s) => agentById(s, agentId))
   const live = useLive(agentId)
-  if (!view?.frame)
+  if (!view || !frame)
     return (
       <div className="screen screen--empty">
         <Icon name="globe" size={22} />
@@ -164,10 +191,10 @@ function BrowserScreen({ agentId, onOpen }: { agentId: string; onOpen?: () => vo
   const c = view.cursor
   // Taken over on a server: the picture is the browser. Clicks land where I click,
   // keys and pastes go to the page, the wheel scrolls it.
-  if (view.shown && windowless() && !onOpen) return <DrivenScreen agentId={agentId} frame={view.frame} title={view.title} />
+  if (view.shown && windowless() && !onOpen) return <DrivenScreen agentId={agentId} frame={frame} title={view.title} />
   return (
     <div className={`screen ${onOpen ? 'screen--button' : ''}`} onClick={onOpen} role={onOpen ? 'button' : undefined}>
-      <img className="screen__frame" src={view.frame} alt={view.title} draggable={false} />
+      <img className="screen__frame" src={frame} alt={view.title} draggable={false} />
       {c && !view.shown && agent && (
         <span className={`screen__cursor c-${agent.color} ${live ? '' : 'is-idle'}`} style={{ ...ownColor(agent), transform: `translate(${c.x * 100}%, ${c.y * 100}%)` }}>
           <i key={c.at} className="screen__ripple" />
@@ -287,6 +314,7 @@ function TakeOver({ agentId }: { agentId: string }): ReactNode {
 // with what it did. Older messages get a small card.
 export function BrowserCard({ agentId, big }: { agentId: string; big?: boolean }): ReactNode {
   const view = useStore((s) => browserOf(s, agentId))
+  const frame = useFrame(agentId)
   const name = useStore((s) => agentById(s, agentId)?.name ?? L('agente', 'agent'))
   const open = useStore((s) => s.panel?.kind === 'browser' && s.panel.agentId === agentId)
   const show = (): void => openPanel({ kind: 'browser', agentId })
@@ -320,8 +348,8 @@ export function BrowserCard({ agentId, big }: { agentId: string; big?: boolean }
 
   return (
     <button className={`artifact-card browser-card ${open ? 'is-open' : ''}`} onClick={show}>
-      {view?.frame ? (
-        <img className="browser-card__thumb" src={view.frame} alt="" />
+      {frame ? (
+        <img className="browser-card__thumb" src={frame} alt="" />
       ) : (
         <span className="artifact-card__icon">
           <Icon name="globe" size={16} />
@@ -359,6 +387,17 @@ function BrowserPanel({ agentId }: { agentId: string }): ReactNode {
   )
 }
 
+// The panel over the whole page, for reading or working in it at full size, and back beside the conversation.
+export function WidenButton(): ReactNode {
+  const wide = useStore((s) => s.panelWide)
+  const label = wide ? L('Voltar pro lado da conversa', 'Back beside the conversation') : L('Expandir', 'Expand')
+  return (
+    <button className={`icon-btn ${wide ? 'is-active' : ''}`} title={label} aria-label={label} aria-pressed={wide} onClick={() => widenPanel(!wide)}>
+      <Icon name={wide ? 'shrink' : 'expand'} size={14} />
+    </button>
+  )
+}
+
 export function SidePanel(): ReactNode {
   const panel = useStore((s) => s.panel)
   const artifact = useStore((s) => (s.panel?.kind === 'artifact' ? s.artifacts.find((a) => a.id === (s.panel as { id: string }).id) : undefined))
@@ -367,12 +406,15 @@ export function SidePanel(): ReactNode {
   )
   const browser = useStore((s) => (s.panel?.kind === 'browser' ? browserOf(s, s.panel.agentId) : undefined))
   const browserName = useStore((s) => (s.panel?.kind === 'browser' ? agentById(s, s.panel.agentId)?.name : undefined))
+  const canSave = useStore(canSaveArtifact)
   const [reload, setReload] = useState(0)
+  const wide = useStore((s) => s.panelWide)
   if (!panel || panel.kind === 'thread') return null // a thread is drawn by its conversation
 
   const title = artifact?.title ?? service?.name ?? (panel.kind === 'browser' ? L(`Navegador de ${browserName ?? 'agente'}`, `${browserName ?? 'Agent'}'s browser`) : '')
   return (
-    <aside className={`side-panel side-panel--${panel.kind}`}>
+    <aside className={`side-panel side-panel--${panel.kind} ${wide ? 'is-wide' : ''}`}>
+      {!wide && <PanelResize />}
       <header className="side-panel__head">
         <Icon name={panel.kind === 'service' || panel.kind === 'browser' ? 'globe' : 'edit'} size={14} />
         <strong className="side-panel__title">{title}</strong>
@@ -380,6 +422,11 @@ export function SidePanel(): ReactNode {
         {panel.kind === 'browser' && <LiveBadge agentId={panel.agentId} />}
         <span className="grow" />
         {panel.kind === 'browser' && <TakeOver agentId={panel.agentId} />}
+        {artifact && canSave && (
+          <button className="btn btn--sm btn--ghost" title={artifact.name} onClick={() => saveArtifact(artifact)}>
+            <Icon name="down" size={14} /> {saveLabel()}
+          </button>
+        )}
         {service?.url && (
           <>
             <button className="icon-btn" title={L('Recarregar', 'Reload')} onClick={() => setReload((n) => n + 1)}>
@@ -390,6 +437,7 @@ export function SidePanel(): ReactNode {
             </button>
           </>
         )}
+        <WidenButton />
         <button className="icon-btn" title={L('Fechar', 'Close')} onClick={() => openPanel(null)}>
           <Icon name="x" size={14} />
         </button>
@@ -441,14 +489,50 @@ function ArtifactView({ artifact }: { artifact: Artifact }): ReactNode {
     case 'pdf':
       return <iframe src={url} title={artifact.title} />
     case 'markdown':
-      return <div className="side-panel__doc md">{text !== null && <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>}</div>
+      return <div className="side-panel__doc md">{text !== null && <Markdown urlTransform={safeUrl} remarkPlugins={[remarkGfm]}>{text}</Markdown>}</div>
     case 'csv':
       return <div className="side-panel__doc">{text !== null && <CsvTable text={text} tab={artifact.name.endsWith('.tsv')} />}</div>
     case 'text':
       return <pre className="side-panel__text">{text}</pre>
     default:
-      return <p className="empty">{L('Sem visualização pra esse tipo de arquivo', 'No preview for this kind of file')} ({artifact.name}, {bytes(artifact.size)}).</p>
+      return (
+        <div className="side-panel__empty">
+          <div className="empty">
+            <Icon name="clip" size={22} />
+            <p>{L('Sem visualização pra esse tipo de arquivo', 'No preview for this kind of file')}</p>
+            <p className="muted">
+              {artifact.name} · {bytes(artifact.size)}
+            </p>
+            {/* On a server the file isn't on this computer: it comes down instead of showing in a folder. */}
+            {windowless() ? (
+              <button className="btn btn--sm btn--primary side-panel__reveal" onClick={() => saveArtifact(artifact)}>
+                <Icon name="down" size={14} /> {L('Baixar', 'Download')}
+              </button>
+            ) : (
+              <RevealArtifact artifactId={artifact.id} />
+            )}
+          </div>
+        </div>
+      )
   }
+}
+
+// Only the owner at the computer's own window: a member or a web page would open a Finder on a screen it can't see.
+function RevealArtifact({ artifactId }: { artifactId: string }): ReactNode {
+  const platform = useStore((s) => s.platform)
+  const local = useStore((s) => amOwner(s) && !windowless())
+  if (!local) return null
+  const label =
+    platform === 'mac'
+      ? L('Mostrar no Finder', 'Show in Finder')
+      : platform === 'windows'
+        ? L('Mostrar no Explorador', 'Show in Explorer')
+        : L('Mostrar na pasta', 'Show in folder')
+  return (
+    <button className="btn btn--sm side-panel__reveal" onClick={() => revealArtifact(artifactId)}>
+      <Icon name="folder" size={14} /> {label}
+    </button>
+  )
 }
 
 // Enough CSV for a preview: quoted fields, escaped quotes, first 500 rows.

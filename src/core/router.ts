@@ -1,10 +1,13 @@
 // The router picks who answers a channel message nobody was mentioned in. It
 // only chooses speakers: it grants nothing and never sees tools, just which
 // connectors each agent may use, so a question about Linear goes to whoever
-// can read Linear.
+// can read Linear. It also screens an agent's reply that mentions others, so a
+// "thanks, @bia" doesn't wake her up.
 import { L } from '../shared/lang'
-import type { Agent, Connector, Message } from '../shared/types'
-import type { Engine, Usage } from './engines/types'
+import { MENTION } from '../shared/mention-text'
+import { CODE_SPANS, type Agent, type Connector, type Message, type Person } from '../shared/types'
+import type { Engine, TurnShape, Usage } from './engines/types'
+import type { ThreadDigest } from './memory'
 
 export const ROUTER_HISTORY = 10
 export const MAX_ROUTED = 2
@@ -18,7 +21,8 @@ export const routerSystem = (): string =>
       '- "todos": true quando a mensagem é pro grupo todo (um cumprimento, "pessoal", uma pergunta pra todos, uma apresentação): aí todos os agentes respondem.',
       '- "reason": um motivo de até 12 palavras, em português.',
       'Se a mensagem depende de um sistema externo (ex.: Linear, GitHub), prefira quem tem acesso a ele; se ninguém tem, escolha pelo papel.',
-      'Um cumprimento nunca fica sem resposta. Lista vazia (e "todos" falso) só quando ninguém precisa responder: agradecimento, recado, conversa já encerrada.'
+      'Uma resposta curta a uma pergunta ou pedido de um agente ("pode", "sim", "pode disparar", "manda ver") vai pra esse agente, mesmo quando a pergunta está numa mensagem anterior do canal ou em outra thread: é ele quem está esperando.',
+      'Um cumprimento nunca fica sem resposta. Fora isso, chame só quem tem algo claro a fazer ou a responder: lista vazia (e "todos" falso) quando a mensagem não pede nada a nenhum agente, como um agradecimento, um recado, uma conversa já encerrada.'
     ].join('\n'),
     [
       'You decide which agents in a work chat should answer the last human message.',
@@ -27,7 +31,8 @@ export const routerSystem = (): string =>
       '- "everyone": true when the message is for the whole group (a greeting, "everyone", a question for all, an introduction): then every agent answers.',
       '- "reason": a reason of up to 12 words, in English.',
       'If the message depends on an external system (e.g. Linear, GitHub), prefer whoever has access to it; if no one does, choose by role.',
-      "A greeting never goes unanswered. An empty list (and \"everyone\" false) only when no one needs to answer: a thank-you, a note, a conversation that's already over."
+      'A short answer to an agent\'s question or request ("yes", "go ahead", "you can run it", "do it") goes to that agent, even when the question is in an earlier message of the channel or in another thread: that agent is the one waiting.',
+      "A greeting never goes unanswered. Beyond that, call only who has something clear to do or answer: an empty list (and \"everyone\" false) when the message asks nothing of any agent, like a thank-you, a note, a conversation that's already over."
     ].join('\n')
   )
 
@@ -45,37 +50,179 @@ export function describeAgent(a: Agent, connectors: Connector[] = []): string {
 
 export const REPLY_JSON = (): string => L('Responda só com o JSON.', 'Reply with the JSON only.')
 
-// `thread`: the message that started the thread the last message is in; `messages` are then its replies.
-export function routerPrompt(opts: { messages: Message[]; agents: Agent[]; me: string; connectors?: Connector[]; thread?: Message }): string {
-  const { messages, agents, me, connectors = [], thread } = opts
+const said = (m: Message): boolean => !!m.text.trim() && m.author.kind !== 'system'
+
+// A long message as its opening and its end: a question or a request is usually at the end of a
+// long reply ("…posso disparar agora?"), and the router needs it to know who is waiting for an answer.
+export const opensAndEnds = (text: string, max: number): string => {
+  const t = text.replace(/\s+/g, ' ').trim()
+  if (t.length <= max) return t
+  const half = Math.floor((max - 5) / 2)
+  return `${t.slice(0, half).trimEnd()} […] ${t.slice(-half).trimStart()}`
+}
+
+// Who wrote a message, as the router reads it.
+// A person's message reads with their name (one not in `people`, as `me`).
+type People = Pick<Person, 'id' | 'name'>[]
+const speaker =
+  (agents: Agent[], me: string, people?: People) =>
+  (m: Message): string =>
+    m.author.kind === 'person'
+      ? (people?.find((p) => m.author.kind === 'person' && p.id === m.author.id)?.name ?? me)
+      : m.author.kind === 'routine'
+        ? L(`rotina de ${me}`, `${me}'s routine`)
+        : (agents.find((a) => m.author.kind === 'agent' && a.id === m.author.id)?.name ?? L('agente', 'agent'))
+
+// `thread`: the message that started the thread the last message is in; `messages` are then
+// that thread, and `threads` the conversation's other threads, a line each (who took what).
+// `team`: more than one person talks here; what they say to each other isn't for the agents.
+export function routerPrompt(opts: { messages: Message[]; agents: Agent[]; me: string; people?: People; connectors?: Connector[]; thread?: Message; threads?: ThreadDigest[]; team?: boolean }): string {
+  const { messages, agents, me, people, connectors = [], thread, threads = [], team } = opts
   const roster = agents.map((a) => `- ${a.handle}: ${describeAgent(a, connectors)}`)
-  const said = (m: Message): boolean => !!m.text.trim() && m.author.kind !== 'system'
-  const recent = messages.filter(said).slice(-ROUTER_HISTORY)
-  const lines = [...(thread && said(thread) ? [thread] : []), ...recent]
-    .map((m) => {
-      const author =
-        m.author.kind === 'me'
-          ? me
-          : m.author.kind === 'routine'
-            ? L(`rotina de ${me}`, `${me}'s routine`)
-            : (agents.find((a) => m.author.kind === 'agent' && a.id === m.author.id)?.name ?? L('agente', 'agent'))
-      return `[${author}] ${m.text.trim().slice(0, 600)}`
+  const name = speaker(agents, me, people)
+  const recent = messages.filter((m) => said(m) && m.id !== thread?.id).slice(-ROUTER_HISTORY)
+  const lines = [...(thread && said(thread) ? [thread] : []), ...recent].map((m) => `[${name(m)}] ${opensAndEnds(m.text, 800)}`)
+  // Who answered what elsewhere, so a follow-up goes to whoever handled the subject, and how an
+  // agent's last word there ended: a question there may be what this message answers.
+  const others = threads
+    .filter((t) => t.root && said(t.root))
+    .map((t) => {
+      const who = t.agents.map((id) => agents.find((a) => a.id === id)?.name ?? L('agente', 'agent')).join(', ')
+      const last = t.last && t.last.id !== t.root!.id && t.last.author.kind === 'agent' ? ` · ${L('por último', 'last')} [${name(t.last)}] ${opensAndEnds(t.last.text, 300)}` : ''
+      return `- [${name(t.root!)}] ${opensAndEnds(t.root!.text, 300)} → ${who || L('sem resposta', 'no reply')}${last}`
     })
   return [
     L('Agentes no canal:', 'Agents in the channel:'),
     ...roster,
     '',
+    ...(others.length ? [L('Antes, no canal (outras threads e mensagens, das mais antigas pras mais novas: quem respondeu cada uma e como terminou):', 'Earlier in the channel (other threads and messages, oldest to newest: who answered each and how it ended):'), ...others, ''] : []),
     thread
       ? L('Thread (a primeira mensagem abriu a thread; a última é a que precisa de resposta):', 'Thread (the first message started it; the last one is the one that needs an answer):')
       : L('Conversa (a última é a que precisa de resposta):', 'Conversation (the last one is the one that needs an answer):'),
     ...lines,
+    '',
+    ...(team
+      ? [
+          L(
+            'Aqui conversam várias pessoas. Um cumprimento ou recado entre as pessoas, sem pergunta nem pedido pros agentes ("bom dia", "chego às 10", "@Ana valeu"), não precisa de agente: lista vazia e "todos" falso. Isso vale no lugar da regra do cumprimento.',
+            'Several people talk here. A greeting or note between the people, with no question or request for the agents ("good morning", "in at 10", "@Ana thanks"), needs no agent: empty list and "everyone" false. This replaces the greeting rule.'
+          ),
+          ''
+        ]
+      : []),
+    REPLY_JSON()
+  ].join('\n')
+}
+
+export const handoffSystem = (): string =>
+  L(
+    [
+      'Um agente de um chat de trabalho escreveu uma resposta que menciona outros agentes. Você decide quais deles precisam agir por causa dela.',
+      'Responda SOMENTE com JSON, sem texto em volta, no formato {"handles": ["..."], "reason": "..."}:',
+      '- "handles": só handles da lista de agentes mencionados.',
+      '- "reason": um motivo de até 12 palavras, em português.',
+      'Passe a vez para: um pedido, uma pergunta, uma tarefa, uma revisão, uma decisão que alguém está esperando.',
+      'Não passe a vez para: agradecimento, confirmação ("combinado", "valeu", "ok", 👍), menção que só dá crédito ou informa, recado sem pedido, ficar esperando o aviso ou o resultado de alguém ("Fico esperando o aviso do Léo").',
+      'Na dúvida, passe a vez.'
+    ].join('\n'),
+    [
+      'An agent in a work chat wrote a reply that mentions other agents. You decide which of them need to act because of it.',
+      'Reply ONLY with JSON, no text around it, in the format {"handles": ["..."], "reason": "..."}:',
+      '- "handles": only handles from the list of mentioned agents.',
+      '- "reason": a reason of up to 12 words, in English.',
+      'Hand the turn over for: a request, a question, a task, a review, a decision someone is waiting on.',
+      "Do not hand it over for: thanks, an acknowledgement (\"agreed\", \"thanks\", \"ok\", 👍), a mention that only credits or informs, a note with no ask, waiting for someone's update or result (\"I'll wait for Léo's heads-up\").",
+      'When in doubt, hand the turn over.'
+    ].join('\n')
+  )
+
+// A long reply goes to the hand-off screen as its opening plus the lines around each mention
+// of a candidate, so an ask written at the end of a long plan ("@rafa, I need two decisions")
+// is what gets judged. What's left out shows as "[…]". A short reply goes in whole.
+const REPLY_MAX = 3000
+const OPENING = 1000
+const BEFORE = 600
+const AFTER = 1200
+// A cut moves to the nearest line break when one is this close, so lines arrive whole.
+const SNAP = 200
+
+const lineStart = (t: string, i: number): number => {
+  const n = t.lastIndexOf('\n', i)
+  return n >= 0 && i - n <= SNAP ? n + 1 : i
+}
+const lineEnd = (t: string, i: number): number => {
+  const n = t.indexOf('\n', i)
+  return n >= 0 && n - i <= SNAP ? n : i
+}
+
+export function replyExcerpt(reply: string, handles: string[]): string {
+  const text = reply.trim()
+  if (text.length <= REPLY_MAX) return text
+  const wanted = new Set(handles.map((h) => h.toLowerCase()))
+  // Same rule as `mentioned`: a handle inside code doesn't count. Blanking keeps the offsets.
+  const plain = text.replace(CODE_SPANS, (s) => ' '.repeat(s.length))
+  // The first and the last mention of each candidate: the ask is usually one of them, and a reply
+  // that names someone on every line still goes in bounded.
+  const at = new Map<string, number[]>()
+  for (const m of plain.matchAll(MENTION)) {
+    const h = m[2]!.toLowerCase()
+    if (!wanted.has(h)) continue
+    const i = m.index + m[1]!.length
+    const seen = at.get(h)
+    if (!seen) at.set(h, [i])
+    else seen[1] = i
+  }
+  const spans: [number, number][] = [[0, lineEnd(text, OPENING)]]
+  for (const i of [...at.values()].flat()) spans.push([lineStart(text, Math.max(0, i - BEFORE)), lineEnd(text, Math.min(text.length, i + AFTER))])
+  spans.sort((a, b) => a[0] - b[0])
+  const merged: [number, number][] = []
+  for (const [from, to] of spans) {
+    const last = merged[merged.length - 1]
+    if (last && from <= last[1] + 1) last[1] = Math.max(last[1], to)
+    else merged.push([from, to])
+  }
+  const parts = merged.map(([from, to]) => text.slice(from, to).trim())
+  const end = merged[merged.length - 1]![1]
+  return parts.join('\n[…]\n') + (end < text.length ? '\n[…]' : '')
+}
+
+// The reply sits between <reply> tags so it can't be confused with the roster or the history.
+export function handoffPrompt(opts: { reply: string; author: Agent; candidates: Agent[]; messages: Message[]; members: Agent[]; me: string; people?: People; connectors?: Connector[]; busy?: Agent[] }): string {
+  const { reply, author, candidates, messages, members, me, people, connectors = [], busy = [] } = opts
+  const name = speaker(members, me, people)
+  const excerpt = replyExcerpt(reply, candidates.map((a) => a.handle))
+  const cut = excerpt !== reply.trim()
+  return [
+    L('Agentes mencionados:', 'Mentioned agents:'),
+    ...candidates.map((a) => `- ${a.handle}: ${describeAgent(a, connectors)}`),
+    ...(busy.length
+      ? [
+          L(
+            `Já estão respondendo aqui: ${busy.map((a) => a.name).join(', ')}. Só passe a vez para eles se a resposta trouxer algo novo pra eles (decisão, pedido, correção).`,
+            `Already replying here: ${busy.map((a) => a.name).join(', ')}. Only hand them the turn if the reply brings them something new (a decision, a request, a correction).`
+          )
+        ]
+      : []),
+    '',
+    L('Conversa recente:', 'Recent conversation:'),
+    ...messages.filter(said).slice(-ROUTER_HISTORY).map((m) => `[${name(m)}] ${m.text.trim().slice(0, 600)}`),
+    '',
+    cut
+      ? L(
+          `Resposta de ${author.name} que você avalia (longa: vão o começo e os trechos com as menções; […] marca o que ficou de fora):`,
+          `${author.name}'s reply you are judging (long: its opening and the parts with the mentions; […] marks what was left out):`
+        )
+      : L(`Resposta de ${author.name} que você avalia:`, `${author.name}'s reply you are judging:`),
+    '<reply>',
+    excerpt,
+    '</reply>',
     '',
     REPLY_JSON()
   ].join('\n')
 }
 
 // Lenient: models sometimes wrap JSON in a code fence or add a line around it.
-export function parseRoute(text: string, agents: Agent[]): { agents: Agent[]; reason: string } | null {
+export function parseRoute(text: string, agents: Agent[], max = MAX_ROUTED): { agents: Agent[]; reason: string } | null {
   const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
   if (!json) return null
   let data: unknown
@@ -96,8 +243,11 @@ export function parseRoute(text: string, agents: Agent[]): { agents: Agent[]; re
     const a = agents.find((x) => x.handle.toLowerCase() === h.replace(/^@/, '').toLowerCase())
     if (a && !picked.includes(a)) picked.push(a)
   }
-  return { agents: picked.slice(0, MAX_ROUTED), reason: why }
+  return { agents: picked.slice(0, max), reason: why }
 }
+
+// The router's turn without its prompt: the same for every message, so its process can start ahead.
+export const routerTurn = (model: string, cwd: string): TurnShape => ({ model, effort: 'low', system: routerSystem(), cwd })
 
 export async function route(opts: {
   engine: Engine
@@ -105,8 +255,43 @@ export async function route(opts: {
   messages: Message[]
   agents: Agent[]
   me: string
+  people?: People
   connectors?: Connector[]
   thread?: Message
+  threads?: ThreadDigest[]
+  team?: boolean
+  cwd: string
+}): Promise<{ agents: Agent[]; reason: string; usage?: Usage; ms: number } | { error: string; usage?: Usage; ms: number }> {
+  const started = Date.now()
+  let text = ''
+  let usage: Usage | undefined
+  let error: string | undefined
+  for await (const ev of opts.engine.run({ ...routerTurn(opts.model, opts.cwd), prompt: routerPrompt(opts), signal: AbortSignal.timeout(60_000) })) {
+    if (ev.type === 'text') text += ev.delta
+    else if (ev.type === 'done') {
+      text = ev.text || text
+      usage = ev.usage
+    } else if (ev.type === 'error') error = ev.message
+  }
+  const ms = Date.now() - started
+  if (error) return { error, usage, ms }
+  const parsed = parseRoute(text, opts.agents)
+  return parsed ? { ...parsed, usage, ms } : { error: L('resposta do router fora do formato', "the router's answer wasn't in the format"), usage, ms }
+}
+
+// Which of the agents an agent's reply mentions need to act on it. Same engine loop as route().
+export async function screenHandoff(opts: {
+  engine: Engine
+  model: string
+  reply: string
+  author: Agent
+  candidates: Agent[]
+  messages: Message[]
+  members: Agent[]
+  me: string
+  people?: People
+  connectors?: Connector[]
+  busy?: Agent[]
   cwd: string
 }): Promise<{ agents: Agent[]; reason: string; usage?: Usage; ms: number } | { error: string; usage?: Usage; ms: number }> {
   const started = Date.now()
@@ -116,8 +301,8 @@ export async function route(opts: {
   for await (const ev of opts.engine.run({
     model: opts.model,
     effort: 'low',
-    system: routerSystem(),
-    prompt: routerPrompt(opts),
+    system: handoffSystem(),
+    prompt: handoffPrompt(opts),
     cwd: opts.cwd,
     signal: AbortSignal.timeout(60_000)
   })) {
@@ -129,6 +314,99 @@ export async function route(opts: {
   }
   const ms = Date.now() - started
   if (error) return { error, usage, ms }
-  const parsed = parseRoute(text, opts.agents)
+  // A reply may mention up to three agents, and each one asked needs the turn.
+  const parsed = parseRoute(text, opts.candidates, opts.candidates.length)
+  return parsed ? { ...parsed, usage, ms } : { error: L('resposta do router fora do formato', "the router's answer wasn't in the format"), usage, ms }
+}
+
+// ---------- calling someone in (proactive) ----------
+
+// After an agent's reply that passes the turn to no one, in a channel with others: whether one of them has
+// something concrete to do now, in their own area, because of it. Never to comment or agree: to act.
+export const chimeSystem = (): string =>
+  L(
+    [
+      'Num chat de trabalho, um agente acabou de responder sem passar a vez a ninguém. Você decide se UM outro agente do canal tem uma ação concreta a fazer agora, da área dele, por causa dessa resposta.',
+      'Responda SOMENTE com JSON, sem texto em volta, no formato {"handle": "..." ou null, "reason": "..."}:',
+      '- "handle": no máximo um, só da lista de candidatos; null quando ninguém tem uma ação clara.',
+      '- "reason": por que é dele, em até 8 palavras, em português ("revisão de código é da área dele").',
+      'Chame só pra agir: revisar o que foi feito, testar, publicar, corrigir, completar uma parte que é claramente do papel dele e que ninguém pediu ainda.',
+      'Não chame pra comentar, concordar, agradecer, resumir ou repetir o que já foi dito. Não chame quem já foi chamado nesse assunto. Na dúvida, null.'
+    ].join('\n'),
+    [
+      'In a work chat, an agent just replied without passing the turn to anyone. You decide whether ONE other agent in the channel has a concrete action to take now, in their own area, because of that reply.',
+      'Reply ONLY with JSON, no text around it, in the format {"handle": "..." or null, "reason": "..."}:',
+      '- "handle": at most one, only from the list of candidates; null when no one has a clear action.',
+      '- "reason": why it is theirs, in up to 8 words, in English ("code review is their area").',
+      'Call only to act: review what was done, test, publish, fix, complete a part that is clearly their role and that nobody asked for yet.',
+      'Do not call to comment, agree, thank, summarize or repeat what was said. Do not call someone already called on this subject. When in doubt, null.'
+    ].join('\n')
+  )
+
+export function chimePrompt(opts: { reply: string; author: Agent; candidates: Agent[]; messages: Message[]; members: Agent[]; me: string; people?: People; connectors?: Connector[]; asked?: string }): string {
+  const { reply, author, candidates, messages, members, me, people, connectors = [], asked } = opts
+  const name = speaker(members, me, people)
+  return [
+    L('Candidatos:', 'Candidates:'),
+    ...candidates.map((a) => `- ${a.handle}: ${describeAgent(a, connectors)}`),
+    '',
+    ...(asked ? [L(`O que ${me} pediu: ${opensAndEnds(asked, 600)}`, `What ${me} asked: ${opensAndEnds(asked, 600)}`), ''] : []),
+    L('Conversa recente:', 'Recent conversation:'),
+    ...messages.filter(said).slice(-ROUTER_HISTORY).map((m) => `[${name(m)}] ${opensAndEnds(m.text, 500)}`),
+    '',
+    L(`Resposta de ${author.name} que acabou de terminar:`, `${author.name}'s reply that just ended:`),
+    '<reply>',
+    opensAndEnds(reply, REPLY_MAX),
+    '</reply>',
+    '',
+    REPLY_JSON()
+  ].join('\n')
+}
+
+export function parseChime(text: string, candidates: Agent[]): { agent?: Agent; reason: string } | null {
+  const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
+  if (!json) return null
+  let data: unknown
+  try {
+    data = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (!data || typeof data !== 'object') return null
+  const { handle, reason } = data as { handle?: unknown; reason?: unknown }
+  const why = typeof reason === 'string' ? reason.trim().slice(0, 120) : ''
+  const h = typeof handle === 'string' ? handle.replace(/^@/, '').toLowerCase() : ''
+  const agent = h ? candidates.find((a) => a.handle.toLowerCase() === h) : undefined
+  return { ...(agent ? { agent } : {}), reason: why }
+}
+
+export async function chimeIn(opts: {
+  engine: Engine
+  model: string
+  reply: string
+  author: Agent
+  candidates: Agent[]
+  messages: Message[]
+  members: Agent[]
+  me: string
+  people?: People
+  connectors?: Connector[]
+  asked?: string
+  cwd: string
+}): Promise<{ agent?: Agent; reason: string; usage?: Usage; ms: number } | { error: string; usage?: Usage; ms: number }> {
+  const started = Date.now()
+  let text = ''
+  let usage: Usage | undefined
+  let error: string | undefined
+  for await (const ev of opts.engine.run({ model: opts.model, effort: 'low', system: chimeSystem(), prompt: chimePrompt(opts), cwd: opts.cwd, signal: AbortSignal.timeout(60_000) })) {
+    if (ev.type === 'text') text += ev.delta
+    else if (ev.type === 'done') {
+      text = ev.text || text
+      usage = ev.usage
+    } else if (ev.type === 'error') error = ev.message
+  }
+  const ms = Date.now() - started
+  if (error) return { error, usage, ms }
+  const parsed = parseChime(text, opts.candidates)
   return parsed ? { ...parsed, usage, ms } : { error: L('resposta do router fora do formato', "the router's answer wasn't in the format"), usage, ms }
 }
