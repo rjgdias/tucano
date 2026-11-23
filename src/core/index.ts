@@ -56,7 +56,6 @@ import { checkJevKey, JEV_MODEL, JEV_SECRET } from './jev'
 import { report } from './report'
 import { usage } from './usage'
 import { Skills } from './skills'
-import { deleteAgent } from './agent-delete'
 import { cleanTitle, pageKey, Wiki, type WikiView } from './wiki'
 import { COPY_SUFFIX, WikiGit } from './wiki-git'
 import { settingsPatchError } from './settings-patch'
@@ -1958,7 +1957,6 @@ const api: Handlers = {
 
   saveAgent: ({ agent, channelIds }, ctx) => {
     const before = db.agent(agent.id)
-    if (before?.kind === 'removed') throw new Error(L('Esse agente foi excluído.', 'That agent was deleted.'))
     // Archived changes only through archiveAgent, which also stops what the agent was doing.
     // Its owner changes only with the removal hand-over, never by an edit (one with none is the
     // Tucano owner's, as db.agent reads it): a new one is whoever made it.
@@ -2015,7 +2013,7 @@ const api: Handlers = {
   // its routines turn off, its browser closes. Its channels and settings stay for when it comes back.
   archiveAgent: ({ id, archived }, ctx) => {
     const agent = db.agent(id)
-    if (!agent || agent.kind === 'removed' || agent.archived === archived) return
+    if (!agent || agent.archived === archived) return
     record(ctx, archived ? 'agent.archived' : 'agent.restored', id, { name: agent.name })
     if (archived) {
       for (const m of db.messagesWithRun(['working', 'waiting_approval'])) if (m.author.kind === 'agent' && m.author.id === id) runner.stop(m.id)
@@ -2027,31 +2025,6 @@ const api: Handlers = {
     refreshRestricted()
     emit({ type: 'agent', agent: db.agent(id)! })
     emitConversations()
-  },
-
-  deleteAgent: ({ id }, ctx) => {
-    record(ctx, 'agent.deleted', id, { name: db.agent(id)?.name })
-    void deleteAgent(id, {
-      db,
-      emit,
-      emitConversations,
-      workDir: join(dataDir, 'agents'),
-      stopRun: (messageId) => runner.stop(messageId),
-      forgetSessions: (agentId) => runner.forgetSessions({ agentId }),
-      removeRoutine: (routineId) => routines.remove(routineId),
-      deleteConversation: (cid) => {
-        const c = db.conversation(cid)
-        if (c) dropConversation(ctx, c)
-      },
-      forgetMemories: (agentId) => memory.forgetAgent(agentId),
-      forgetSkills: (agentId) => skills.forgetAgent(agentId),
-      eraseComputer: async (agent) => {
-        if (agent.computer && agent.computerKind === 'mac') await computers.mac.erase(agent.id)
-        // Also for a computer since turned off: its container and files wait for it to be turned back on.
-        if (agent.computer || existsSync(join(dataDir, 'computers', agent.id))) await computers.erase(agent.id)
-      },
-      eraseBrowser: (agent) => browser.action(agent, 'clear')
-    })
   },
   renameChannel: ({ id, name }, ctx) => {
     const conv = db.conversation(id)
@@ -2221,10 +2194,7 @@ const api: Handlers = {
     return out
   },
   // One DM per agent and person.
-  openDm: ({ agentId }, ctx) => {
-    if (db.agent(agentId)?.kind === 'removed') throw new Error(L('Esse agente foi excluído.', 'That agent was deleted.'))
-    return dmFor(ctx, agentId)
-  },
+  openDm: ({ agentId }, ctx) => dmFor(ctx, agentId),
 
   // ---------- the board's to-dos (Quadro) ----------
   tasks: (_p, ctx) => db.tasks(ctx.person.id),

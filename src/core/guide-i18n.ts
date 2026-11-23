@@ -15,10 +15,6 @@ export const GUIDE_EN: Record<string, { title: string; summary: string }> = {
     title: "A SQL query's table",
     summary: 'What the agent queried shows in a table under the reply, to sort, filter and copy.'
   },
-  'excluir-agente': {
-    title: 'Deleting an agent',
-    summary: 'Deleting an agent for good: what goes with it, what stays, and when to archive instead.'
-  },
   'organizar-time': {
     title: 'An agent that organizes the team',
     summary: 'Turning on Organizes the team for an agent to propose who answers to whom, with your yes; and the Tuca proposing the org chart when creating agents and teams.'

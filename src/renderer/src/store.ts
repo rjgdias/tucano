@@ -548,12 +548,6 @@ function withSettings(s: State, settings: Settings): State {
   return withMe({ ...s, settings })
 }
 
-// Where to go when what was on screen is gone.
-function landing(conversations: Conversation[]): View {
-  const first = conversations.find((c) => c.kind === 'channel') ?? conversations[0]
-  return first ? { kind: 'conversation', id: first.id } : { kind: 'new-agent' }
-}
-
 function apply(e: CoreEvent): void {
   // Streamed words and the browser's screen come many times a second: they wake only what shows them.
   if (e.type === 'delta') return stream(e.id, e.text)
@@ -587,12 +581,8 @@ function apply(e: CoreEvent): void {
         const found = Object.entries(s.messages).find(([, list]) => list.some((m) => m.id === e.id))
         return found ? { ...s, messages: { ...s.messages, [found[0]]: found[1].filter((m) => m.id !== e.id) } } : s
       }
-      case 'agent': {
-        const agents = upsert(s.agents, e.agent)
-        // Deleted while its page is open: there's nothing left to edit there.
-        if (e.agent.kind === 'removed' && s.view?.kind === 'agent' && s.view.id === e.agent.id) return { ...s, agents, view: landing(s.conversations), panel: null }
-        return { ...s, agents }
-      }
+      case 'agent':
+        return { ...s, agents: upsert(s.agents, e.agent) }
       case 'agent_removed':
         return { ...s, agents: s.agents.filter((a) => a.id !== e.id) }
       case 'conversation': {
@@ -625,6 +615,7 @@ function apply(e: CoreEvent): void {
       case 'conversation_removed': {
         const left = s.conversations.filter((c) => c.id !== e.id)
         const here = s.view?.kind === 'conversation' && s.view.id === e.id
+        const first = left.find((c) => c.kind === 'channel') ?? left[0]
         const { [e.id]: _gone, ...messages } = s.messages
         const { [e.id]: _from, ...history } = s.history
         return {
@@ -632,7 +623,7 @@ function apply(e: CoreEvent): void {
           conversations: left,
           messages,
           history,
-          view: here ? landing(left) : s.view,
+          view: here ? (first ? { kind: 'conversation', id: first.id } : { kind: 'new-agent' }) : s.view,
           panel: here ? null : s.panel
         }
       }
@@ -1009,7 +1000,6 @@ export const importHarnessMcp = (key: string): Promise<string> => call('importHa
 
 export const renameChannel = (id: string, name: string): Promise<void> => call('renameChannel', { id, name })
 export const archiveAgent = (id: string, archived: boolean): Promise<void> => call('archiveAgent', { id, archived })
-export const deleteAgent = (id: string): Promise<void> => fire(L('Não consegui excluir o agente.', "I couldn't delete the agent."), 'deleteAgent', { id })
 export const setTopic = (id: string, topic: string): Promise<void> => call('setTopic', { id, topic })
 // Where a conversation's answers go: each in the thread of what it answers, or in the conversation.
 export const setThreads = (conversationId: string, on: boolean): Promise<void> => call('setThreads', { conversationId, on })
